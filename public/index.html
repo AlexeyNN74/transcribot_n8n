@@ -1396,7 +1396,7 @@ async function loadJobs() {
                       <button class="btn btn-outline btn-sm" onclick="downloadFile('${job.id}','json')">JSON</button>
                       <button class="btn btn-outline btn-sm" onclick="downloadFile('${job.id}','md')">MD</button>
                       <button class="btn btn-outline btn-sm" onclick="downloadFile('${job.id}','docx')">DOCX</button>
-                      ${job.diarize ? '<button class="btn btn-outline btn-sm" onclick="downloadFile(\'" + job.id + "\',\'docx-clean\')">DOCX без голосов</button>' : ''}
+                      ${job.diarize ? `<button class="btn btn-outline btn-sm" onclick="downloadFile('${job.id}','docx-clean')">DOCX без голосов</button>` : ''}
                     </div>` : '—'}
                 </td>
                 <td style="display:flex;gap:6px">
