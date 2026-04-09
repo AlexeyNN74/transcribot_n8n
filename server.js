@@ -561,6 +561,65 @@ app.get('/api/jobs/:id/download/docx', authMiddleware, async (req, res) => {
   }
 });
 
+// ===== DOWNLOAD: DOCX без голосов =====
+
+app.get('/api/jobs/:id/download/docx-clean', authMiddleware, async (req, res) => {
+  const job = db.prepare('SELECT * FROM jobs WHERE id = ? AND user_id = ?').get(req.params.id, req.user.id);
+  if (!job) return res.status(404).json({ error: 'Задание не найдено' });
+  if (!job.result_txt && !job.result_clean) return res.status(404).json({ error: 'Результат не готов' });
+
+  const summary = job.result_txt ? job.result_txt.split('\n---\n')[0].trim() : '';
+  let transcript = job.result_clean ? job.result_clean.trim() : '';
+
+  // Убираем метки говорящих: "Голос 1: текст" → "текст"
+  transcript = transcript.replace(/^Голос \d+:\s*/gm, '').replace(/^SPEAKER_\d+:\s*/gm, '');
+
+  let content = '';
+  if (summary) content += summary;
+  if (summary && transcript) content += '\n\n═══════════════════════════════════════\n\n';
+  if (transcript) content += transcript;
+
+  try {
+    const { Document, Packer, Paragraph, TextRun, HeadingLevel } = require('docx');
+    const lines = content.split('\n');
+    const children = [];
+
+    children.push(new Paragraph({ text: job.original_name, heading: HeadingLevel.HEADING_1 }));
+    children.push(new Paragraph({
+      children: [new TextRun({ text: 'Дата: ' + new Date(job.created_at).toLocaleDateString('ru-RU'), color: '888888', size: 20 })],
+      spacing: { after: 300 },
+    }));
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        children.push(new Paragraph({ text: '' }));
+      } else if (trimmed.startsWith('### ')) {
+        children.push(new Paragraph({ text: trimmed.slice(4), heading: HeadingLevel.HEADING_3 }));
+      } else if (trimmed.startsWith('## ')) {
+        children.push(new Paragraph({ text: trimmed.slice(3), heading: HeadingLevel.HEADING_2 }));
+      } else if (trimmed.startsWith('# ')) {
+        children.push(new Paragraph({ text: trimmed.slice(2), heading: HeadingLevel.HEADING_1 }));
+      } else if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
+        children.push(new Paragraph({ text: trimmed.slice(2), bullet: { level: 0 } }));
+      } else {
+        children.push(new Paragraph({ text: trimmed, spacing: { after: 120 } }));
+      }
+    }
+
+    const doc = new Document({ creator: 'Студия Транскрибации', title: job.original_name, sections: [{ children }] });
+    const buffer = await Packer.toBuffer(doc);
+    const baseName = path.basename(job.original_name, path.extname(job.original_name));
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+    res.setHeader('Content-Disposition', `attachment; filename="${baseName}_clean.docx"`);
+    res.send(buffer);
+  } catch (e) {
+    console.error('[DOCX-CLEAN]', e.message);
+    res.status(500).json({ error: 'Ошибка генерации DOCX: ' + e.message });
+  }
+});
+
 app.get('/api/jobs/:id/download/:format', authMiddleware, (req, res) => {
   const { id, format } = req.params;
   if (!['txt', 'srt', 'json', 'md', 'docx'].includes(format)) return res.status(400).json({ error: 'Неверный формат' });

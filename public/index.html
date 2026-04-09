@@ -920,6 +920,7 @@
       <div style="display:flex;gap:8px;flex-wrap:wrap">
         <button class="btn btn-outline btn-sm" onclick="downloadFile(currentModalJobId,'md')">⬇ MD</button>
         <button class="btn btn-outline btn-sm" onclick="downloadFile(currentModalJobId,'docx')">⬇ DOCX</button>
+        <button class="btn btn-outline btn-sm" id="btn-docx-clean" style="display:none" onclick="downloadFile(currentModalJobId,'docx-clean')">⬇ DOCX без голосов</button>
         <button class="btn btn-outline btn-sm" onclick="downloadFile(currentModalJobId,'srt')">⬇ SRT</button>
         <button class="btn btn-outline btn-sm" onclick="closeJobModal()">Закрыть</button>
       </div>
@@ -1395,6 +1396,7 @@ async function loadJobs() {
                       <button class="btn btn-outline btn-sm" onclick="downloadFile('${job.id}','json')">JSON</button>
                       <button class="btn btn-outline btn-sm" onclick="downloadFile('${job.id}','md')">MD</button>
                       <button class="btn btn-outline btn-sm" onclick="downloadFile('${job.id}','docx')">DOCX</button>
+                      ${job.diarize ? '<button class="btn btn-outline btn-sm" onclick="downloadFile(\'" + job.id + "\',\'docx-clean\')">DOCX без голосов</button>' : ''}
                     </div>` : '—'}
                 </td>
                 <td style="display:flex;gap:6px">
@@ -1640,6 +1642,7 @@ async function viewJob(id) {
   try {
     const job = await api('GET', `/api/jobs/${id}`);
     currentModalJobId = id;
+    document.getElementById("btn-docx-clean").style.display = job.diarize ? "" : "none";
 
     document.getElementById('modal-job-name').textContent = job.original_name;
 
