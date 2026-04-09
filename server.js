@@ -1,3 +1,7 @@
+// Студия Транскрибации — server.js
+// Version: 1.8.2
+// Updated: 2026-04-10
+// Changes: restored MD/DOCX routes, fixed os-start syntax, diarize routing v10
 'use strict';
 
 // ================================================================
