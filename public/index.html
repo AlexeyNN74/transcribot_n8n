@@ -744,11 +744,11 @@
           <div class="card">
             <div class="upload-zone" id="upload-zone" onclick="document.getElementById('file-input').click()" ondragover="handleDragOver(event)" ondrop="handleDrop(event)" ondragleave="this.classList.remove('dragover')">
               <div class="upload-zone-icon">📁</div>
-              <div class="upload-zone-title">Перетащите файл или нажмите для выбора</div>
+              <div class="upload-zone-title">Перетащите файлы или нажмите для выбора</div>
               <div class="upload-zone-hint">MP4, MP3, WAV, M4A, AVI, MOV, MKV, WEBM, OGG, FLAC — до 2GB</div>
               <div id="selected-file" style="margin-top:12px;font-weight:600;color:var(--accent)"></div>
             </div>
-            <input type="file" id="file-input" accept=".mp4,.mp3,.wav,.m4a,.avi,.mov,.mkv,.webm,.ogg,.flac" style="display:none" onchange="handleFileSelect(this)">
+            <input type="file" id="file-input" accept=".mp4,.mp3,.wav,.m4a,.avi,.mov,.mkv,.webm,.ogg,.flac" multiple style="display:none" onchange="handleFileSelect(this)">
 
             <div class="form-group">
               <label>Хранить результат (дней)</label>
@@ -933,7 +933,7 @@
 <script>
 // ===== STATE =====
 let currentUser = null;
-let selectedFile = null;
+let selectedFiles = [];
 let jobsRefreshInterval = null;
 
 // ===== API =====
@@ -1249,9 +1249,11 @@ async function checkAuth() {
 
 // ===== UPLOAD =====
 function handleFileSelect(input) {
-  if (input.files[0]) {
-    selectedFile = input.files[0];
-    document.getElementById('selected-file').textContent = `✓ ${selectedFile.name} (${formatSize(selectedFile.size)})`;
+  if (input.files.length > 0) {
+    selectedFiles = Array.from(input.files);
+    document.getElementById('selected-file').textContent = selectedFiles.length === 1
+      ? `✓ ${selectedFiles[0].name} (${formatSize(selectedFiles[0].size)})`
+      : `✓ ${selectedFiles.length} файлов выбрано`;
     document.getElementById('upload-btn').disabled = false;
   }
 }
@@ -1264,10 +1266,11 @@ function handleDragOver(e) {
 function handleDrop(e) {
   e.preventDefault();
   document.getElementById('upload-zone').classList.remove('dragover');
-  const file = e.dataTransfer.files[0];
-  if (file) {
-    selectedFile = file;
-    document.getElementById('selected-file').textContent = `✓ ${file.name} (${formatSize(file.size)})`;
+  if (e.dataTransfer.files.length > 0) {
+    selectedFiles = Array.from(e.dataTransfer.files);
+    document.getElementById('selected-file').textContent = selectedFiles.length === 1
+      ? `✓ ${selectedFiles[0].name} (${formatSize(selectedFiles[0].size)})`
+      : `✓ ${selectedFiles.length} файлов выбрано`;
     document.getElementById('upload-btn').disabled = false;
   }
 }
@@ -1289,56 +1292,62 @@ async function loadPromptsForUpload() {
 }
 
 async function doUpload() {
-  if (!selectedFile) return;
-
+  if (!selectedFiles.length) return;
   const keepDays = document.getElementById('keep-days').value;
-  const formData = new FormData();
-  formData.append('file', selectedFile);
-  formData.append('keep_days', keepDays);
-  formData.append('diarize', document.getElementById('diarize-check').checked ? '1' : '0');
+  const diarize = document.getElementById('diarize-check').checked ? '1' : '0';
   const promptId = document.getElementById('prompt-id').value;
-  if (promptId) formData.append('prompt_id', promptId);
-
   const btn = document.getElementById('upload-btn');
   btn.disabled = true;
-  btn.innerHTML = '<span class="spinner"></span> Загружаю...';
-
   const progress = document.getElementById('upload-progress');
   const progressFill = document.getElementById('upload-progress-fill');
   const progressText = document.getElementById('upload-progress-text');
   progress.classList.add('show');
   progressText.style.display = 'block';
-
+  const total = selectedFiles.length;
+  let uploaded = 0;
+  let errors = 0;
   try {
-    const xhr = new XMLHttpRequest();
     const token = localStorage.getItem('token');
-
-    await new Promise((resolve, reject) => {
-      xhr.upload.onprogress = (e) => {
-        if (e.lengthComputable) {
-          const pct = Math.round(e.loaded / e.total * 100);
-          progressFill.style.width = pct + '%';
-          progressText.textContent = `Загружено ${formatSize(e.loaded)} из ${formatSize(e.total)} (${pct}%)`;
-        }
-      };
-
-      xhr.onload = () => {
-        if (xhr.status === 200) resolve(JSON.parse(xhr.responseText));
-        else reject(new Error(JSON.parse(xhr.responseText).error || 'Ошибка загрузки'));
-      };
-      xhr.onerror = () => reject(new Error('Ошибка сети'));
-
-      xhr.open('POST', '/api/jobs/upload');
-      xhr.setRequestHeader('Authorization', `Bearer ${token}`);
-      xhr.send(formData);
-    });
-
-    showAlert('upload-alert', 'success', 'Файл загружен! Обработка началась. Переходите в "Мои задания" для отслеживания.');
-    selectedFile = null;
+    for (const file of selectedFiles) {
+      uploaded++;
+      btn.innerHTML = '<span class="spinner"></span> ' + uploaded + '/' + total + ': ' + file.name;
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('keep_days', keepDays);
+      formData.append('diarize', diarize);
+      if (promptId) formData.append('prompt_id', promptId);
+      try {
+        await new Promise((resolve, reject) => {
+          const xhr = new XMLHttpRequest();
+          xhr.upload.onprogress = (e) => {
+            if (e.lengthComputable) {
+              const pct = Math.round(e.loaded / e.total * 100);
+              progressFill.style.width = pct + '%';
+              progressText.textContent = 'Файл ' + uploaded + '/' + total + ': ' + pct + '%';
+            }
+          };
+          xhr.onload = () => {
+            if (xhr.status === 200) resolve(JSON.parse(xhr.responseText));
+            else reject(new Error('Ошибка загрузки'));
+          };
+          xhr.onerror = () => reject(new Error('Ошибка сети'));
+          xhr.open('POST', '/api/jobs/upload');
+          xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+          xhr.send(formData);
+        });
+      } catch(e) {
+        errors++;
+        console.error('Upload error:', file.name, e.message);
+      }
+    }
+    const msg = errors
+      ? 'Загружено ' + (uploaded - errors) + ' из ' + total + ' файлов (' + errors + ' с ошибкой)'
+      : 'Все ' + total + ' файлов загружены! Обработка началась.';
+    showAlert('upload-alert', errors ? 'warning' : 'success', msg);
+    selectedFiles = [];
     document.getElementById('selected-file').textContent = '';
     document.getElementById('file-input').value = '';
     setTimeout(() => { showTab('jobs'); }, 2000);
-
   } catch (e) {
     showAlert('upload-alert', 'error', e.message);
   } finally {
