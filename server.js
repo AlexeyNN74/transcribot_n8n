@@ -483,14 +483,20 @@ app.put('/api/jobs/:id/rating', authMiddleware, (req, res) => {
 app.get('/api/jobs/:id/download/md', authMiddleware, (req, res) => {
   const job = db.prepare('SELECT * FROM jobs WHERE id = ? AND user_id = ?').get(req.params.id, req.user.id);
   if (!job) return res.status(404).json({ error: 'Задание не найдено' });
-  if (!job.result_txt) return res.status(404).json({ error: 'Результат не готов' });
+  if (!job.result_txt && !job.result_clean) return res.status(404).json({ error: 'Результат не готов' });
 
-  const summary = job.result_txt.split('\n---\n')[0].trim();
+  const summary = job.result_txt ? job.result_txt.split('\n---\n')[0].trim() : '';
+  const transcript = job.result_clean ? job.result_clean.trim() : '';
+
+  let content = '';
+  if (summary) content += summary;
+  if (summary && transcript) content += '\n\n═══════════════════════════════════════\n\n';
+  if (transcript) content += transcript;
+
   const baseName = path.basename(job.original_name, path.extname(job.original_name));
-
   res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="${baseName}.md"`);
-  res.send(summary);
+  res.send(content);
 });
 
 // ===== DOWNLOAD: DOCX =====
@@ -499,14 +505,18 @@ app.get('/api/jobs/:id/download/docx', authMiddleware, async (req, res) => {
   const job = db.prepare('SELECT * FROM jobs WHERE id = ? AND user_id = ?').get(req.params.id, req.user.id);
   if (!job) return res.status(404).json({ error: 'Задание не найдено' });
 
-  let content;
-  if (job.result_clean) {
-    content = job.result_clean.trim();
-  } else if (job.result_txt) {
-    content = job.result_txt.split('\n---\n')[0].trim();
-  } else {
+  if (!job.result_txt && !job.result_clean) {
     return res.status(404).json({ error: 'Результат не готов' });
   }
+
+  // Саммари + чистая транскрипция
+  const summary = job.result_txt ? job.result_txt.split('\n---\n')[0].trim() : '';
+  const transcript = job.result_clean ? job.result_clean.trim() : '';
+
+  let content = '';
+  if (summary) content += summary;
+  if (summary && transcript) content += '\n\n═══════════════════════════════════════\n\n';
+  if (transcript) content += transcript;
 
   try {
     const { Document, Packer, Paragraph, TextRun, HeadingLevel } = require('docx');
