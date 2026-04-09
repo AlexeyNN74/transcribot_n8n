@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GPU Server — supreme</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f5f5f0; color: #1a1a1a; padding: 2rem; min-height: 100vh; }
+.panel { max-width: 480px; margin: 0 auto; }
+.header { display: flex; align-items: center; gap: 12px; margin-bottom: 1.5rem; }
+.header h1 { font-size: 18px; font-weight: 500; }
+.tag { font-size: 12px; padding: 3px 10px; border-radius: 20px; background: #ebebeb; color: #666; border: 0.5px solid #ddd; }
+.cat-container { text-align: center; margin-bottom: 1rem; min-height: 90px; }
+.cat { font-size: 64px; line-height: 1; display: block; transition: all 0.4s; }
+.cat-caption { font-size: 12px; color: #999; margin-top: 4px; font-style: italic; }
+.cat-container.working .cat { animation: wiggle 2s ease-in-out infinite; }
+.cat-container.loading .cat { animation: pulse 1s ease-in-out infinite; }
+@keyframes wiggle { 0%, 100% { transform: rotate(-3deg); } 50% { transform: rotate(3deg); } }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+.status-card { background: #fff; border: 0.5px solid #ddd; border-radius: 12px; padding: 1rem 1.25rem; margin-bottom: 1rem; }
+.status-row { display: flex; align-items: center; justify-content: space-between; }
+.status-label { font-size: 13px; color: #666; }
+.status-badge { font-size: 13px; font-weight: 500; padding: 4px 12px; border-radius: 20px; transition: all 0.2s; }
+.badge-active  { background: #eaf3de; color: #3b6d11; }
+.badge-shelved { background: #ebebeb; color: #666; }
+.badge-loading { background: #faeeda; color: #854f0b; }
+.badge-unknown { background: #ebebeb; color: #999; }
+.meta { margin-top: 10px; display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.meta-item { font-size: 12px; color: #999; }
+.meta-item span { color: #555; font-weight: 500; }
+.actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 1rem; }
+.btn { padding: 10px 16px; border-radius: 8px; font-size: 14px; font-weight: 500; cursor: pointer; border: 0.5px solid #ccc; background: #fff; color: #1a1a1a; transition: all 0.15s; display: flex; align-items: center; justify-content: center; gap: 8px; }
+.btn:hover { background: #f5f5f0; }
+.btn:active { transform: scale(0.98); }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+.btn-danger  { border-color: #f09595; color: #a32d2d; }
+.btn-danger:hover  { background: #fcebeb; }
+.btn-success { border-color: #97c459; color: #3b6d11; }
+.btn-success:hover { background: #eaf3de; }
+.btn-full { grid-column: 1 / -1; }
+.info-card { background: #fff; border: 0.5px solid #ddd; border-radius: 12px; overflow: hidden; margin-bottom: 1rem; }
+.info-header { padding: 10px 1.25rem; border-bottom: 0.5px solid #ddd; font-size: 13px; font-weight: 500; color: #666; }
+.info-row { display: flex; align-items: center; justify-content: space-between; padding: 10px 1.25rem; border-bottom: 0.5px solid #eee; }
+.info-row:last-child { border-bottom: none; }
+.info-name { font-size: 13px; color: #555; }
+.info-val  { font-size: 13px; font-weight: 500; font-family: 'SF Mono', 'Fira Code', monospace; color: #1a1a1a; }
+.log { background: #f5f5f0; border: 0.5px solid #ddd; border-radius: 8px; padding: 10px 12px; font-size: 12px; font-family: 'SF Mono', 'Fira Code', monospace; color: #666; max-height: 160px; overflow-y: auto; line-height: 1.7; margin-bottom: 1rem; }
+.log-entry.ok   { color: #3b6d11; }
+.log-entry.err  { color: #a32d2d; }
+.log-entry.info { color: #666; }
+.auth-error { background: #fcebeb; border: 0.5px solid #f09595; border-radius: 8px; padding: 12px 16px; font-size: 13px; color: #a32d2d; margin-bottom: 1rem; display: none; }
+.version { text-align: center; font-size: 11px; color: #bbb; padding-top: 4px; }
+@media (prefers-color-scheme: dark) {
+  body { background: #1a1a1a; color: #e8e8e8; }
+  .tag { background: #2a2a2a; color: #999; border-color: #333; }
+  .status-card, .info-card, .btn { background: #242424; border-color: #333; color: #e8e8e8; }
+  .btn:hover { background: #2e2e2e; }
+  .info-row { border-color: #2e2e2e; }
+  .info-header { border-color: #333; }
+  .log { background: #1e1e1e; border-color: #333; }
+  .badge-shelved, .badge-unknown { background: #2a2a2a; color: #999; }
+  .version { color: #444; }
+}
+</style>
+</head>
+<body>
+<div class="panel">
+  <div class="header">
+    <h1>GPU сервер</h1>
+    <span class="tag">supreme · RTX 3090</span>
+    <span class="tag">195.209.214.7</span>
+  </div>
+
+  <div class="auth-error" id="auth-error">
+    Ошибка доступа. Войдите как администратор и откройте эту страницу снова.
+  </div>
+
+  <div class="cat-container" id="cat-container">
+    <span class="cat" id="cat">🐱</span>
+    <div class="cat-caption" id="cat-caption">выясняю где котик…</div>
+  </div>
+
+  <div class="status-card">
+    <div class="status-row">
+      <span class="status-label">Статус сервера</span>
+      <span class="status-badge badge-unknown" id="server-status">проверяю…</span>
+    </div>
+    <div class="meta">
+      <div class="meta-item">ID: <span>8baf5a78-ef09</span></div>
+      <div class="meta-item">Тариф: <span id="billing-status">—</span></div>
+    </div>
+  </div>
+
+  <div class="actions">
+    <button class="btn btn-success" id="btn-unshelve" onclick="doAction('unshelve')">&#9654; Разбудить</button>
+    <button class="btn btn-danger"  id="btn-shelve"   onclick="doAction('shelve')">&#9632; На полку</button>
+    <button class="btn btn-full"    id="btn-refresh"  onclick="refreshStatus()">&#8635; Обновить статус</button>
+  </div>
+
+  <div class="info-card">
+    <div class="info-header">Информация</div>
+    <div class="info-row">
+      <span class="info-name">IP адрес</span>
+      <span class="info-val">195.209.214.7</span>
+    </div>
+    <div class="info-row">
+      <span class="info-name">Конфигурация</span>
+      <span class="info-val">rtx3090 · 44 vCPU · 64 GB</span>
+    </div>
+    <div class="info-row">
+      <span class="info-name">Whisper</span>
+      <span class="info-val">:8000</span>
+    </div>
+    <div class="info-row">
+      <span class="info-name">Ollama</span>
+      <span class="info-val">:11434</span>
+    </div>
+  </div>
+
+  <div class="log" id="log">
+    <div class="log-entry info">Ищу котика…</div>
+  </div>
+
+  <div class="version">gpu_admin.html · v1.2 · 2026-04-05</div>
+</div>
+
+<script>
+var TOKEN = localStorage.getItem('token') || '';
+var pollingTimer = null;
+
+var CAT_STATES = {
+  shelved: {
+    emoji: '🐱',
+    caption: 'котик спит на полке. тарификация тоже спит. все спят.',
+    cls: 'sleeping',
+    badge: 'SHELVED — котик спит',
+    badgeCls: 'badge-shelved',
+    billing: '💰 не тарифицируется'
+  },
+  active: {
+    emoji: '😸',
+    caption: 'котик работает. GPU горит. счётчик крутится.',
+    cls: 'working',
+    badge: 'ACTIVE — котик работает',
+    badgeCls: 'badge-active',
+    billing: '💸 тарифицируется'
+  },
+  unshelving: {
+    emoji: '🙀',
+    caption: 'котика будят. он недоволен. подождите 1-3 минуты.',
+    cls: 'loading',
+    badge: 'UNSHELVING…',
+    badgeCls: 'badge-loading',
+    billing: '⏳ запускается'
+  },
+  shelving: {
+    emoji: '😴',
+    caption: 'котик укладывается. не мешайте.',
+    cls: 'loading',
+    badge: 'SHELVING…',
+    badgeCls: 'badge-loading',
+    billing: '⏳ останавливается'
+  },
+  shutoff: {
+    emoji: '😾',
+    caption: 'котик выключен. shelve чтобы остановить тариф.',
+    cls: '',
+    badge: 'SHUTOFF — выключен',
+    badgeCls: 'badge-shelved',
+    billing: '💸 тарифицируется!'
+  },
+  shutoff: {
+    emoji: '😾',
+    caption: 'котик выключен (SHUTOFF). нажми Разбудить для запуска.',
+    cls: '',
+    badge: 'SHUTOFF — выключен',
+    badgeCls: 'badge-shelved',
+    billing: '💸 тарифицируется!'
+  },
+  unknown: {
+    emoji: '🐱',
+    caption: 'котик неизвестно где. это тревожно.',
+    cls: '',
+    badge: 'неизвестен',
+    badgeCls: 'badge-unknown',
+    billing: '—'
+  }
+};
+
+function setCatState(key) {
+  var state = CAT_STATES[key] || CAT_STATES.unknown;
+  var cc = document.getElementById('cat-container');
+  var cat = document.getElementById('cat');
+  var caption = document.getElementById('cat-caption');
+  cc.className = 'cat-container ' + state.cls;
+  cat.textContent = state.emoji;
+  caption.textContent = state.caption;
+  document.getElementById('server-status').textContent = state.badge;
+  document.getElementById('server-status').className = 'status-badge ' + state.badgeCls;
+  document.getElementById('billing-status').textContent = state.billing;
+}
+
+function log(msg, type) {
+  type = type || 'info';
+  var el = document.getElementById('log');
+  var d = document.createElement('div');
+  d.className = 'log-entry ' + type;
+  var t = new Date().toLocaleTimeString('ru-RU');
+  d.textContent = '[' + t + '] ' + msg;
+  el.appendChild(d);
+  el.scrollTop = el.scrollHeight;
+}
+
+function applyStatus(status) {
+  currentStatus = status || '';
+  var s = (status || '').toUpperCase();
+  if (s === 'ACTIVE') setCatState('active');
+  else if (s.indexOf('SHELVED') !== -1) setCatState('shelved');
+  else if (s === 'UNSHELVING') setCatState('unshelving');
+  else if (s === 'SHELVING') setCatState('shelving');
+  else if (s === 'SHUTOFF') setCatState('shutoff');
+  else if (s === 'SHUTOFF') setCatState('shutoff');
+  else setCatState('unknown');
+}
+
+function setLoading(yes) {
+  ['btn-unshelve', 'btn-shelve', 'btn-refresh'].forEach(function(id) {
+    document.getElementById(id).disabled = yes;
+  });
+}
+
+function startPolling() {
+  stopPolling();
+  pollingTimer = setInterval(function() {
+    apiGet('/api/gpu/status').then(function(data) {
+      applyStatus(data.status);
+      var s = (data.status || '').toUpperCase();
+      if (s === 'ACTIVE') {
+        stopPolling();
+        log('котик проснулся и готов к работе ✓', 'ok');
+      } else if (s.indexOf('SHELVED') !== -1) {
+        stopPolling();
+        log('котик на полке. тарификация остановлена. спокойной ночи. 💰', 'ok');
+      }
+    }).catch(function() {});
+  }, 10000);
+}
+
+function stopPolling() {
+  if (pollingTimer) { clearInterval(pollingTimer); pollingTimer = null; }
+}
+
+function apiGet(url) {
+  return fetch(url, {
+    headers: { 'Authorization': 'Bearer ' + TOKEN }
+  }).then(function(res) {
+    if (res.status === 401 || res.status === 403) {
+      document.getElementById('auth-error').style.display = 'block';
+      throw new Error('Нет доступа');
+    }
+    return res.json().then(function(data) {
+      if (!res.ok) throw new Error(data.error || 'HTTP ' + res.status);
+      return data;
+    });
+  });
+}
+
+function apiPost(url, body) {
+  return fetch(url, {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + TOKEN, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  }).then(function(res) {
+    if (res.status === 401 || res.status === 403) {
+      document.getElementById('auth-error').style.display = 'block';
+      throw new Error('Нет доступа');
+    }
+    return res.json().then(function(data) {
+      if (!res.ok) throw new Error(data.error || 'HTTP ' + res.status);
+      return data;
+    });
+  });
+}
+
+function refreshStatus() {
+  setLoading(true);
+  log('ищу котика…');
+  apiGet('/api/gpu/status').then(function(data) {
+    applyStatus(data.status);
+    log('нашёл: ' + data.status, 'ok');
+    setLoading(false);
+  }).catch(function(e) {
+    log('котик потерялся: ' + e.message, 'err');
+    setLoading(false);
+  });
+}
+
+var currentStatus = '';
+
+function doAction(action) {
+  // Для кнопки Разбудить — выбираем команду по реальному статусу сервера
+  if (action === 'unshelve') {
+    var s = currentStatus.toUpperCase();
+    if (s === 'SHUTOFF') action = 'start';
+    else action = 'unshelve';
+  }
+  if (action === 'shelve') {
+    if (!confirm('Положить котика на полку?\nGPU выключится, тарификация остановится.')) return;
+  }
+  if (action === 'unshelve') {
+    if (!confirm('Разбудить котика?\nGPU запустится, тарификация начнётся.\nЗапуск займёт 1-3 минуты.')) return;
+  }
+  setLoading(true);
+  stopPolling();
+  if (action === 'unshelve') {
+    log('будим котика…');
+    setCatState('unshelving');
+    apiPost('/api/gpu/action', { action: 'unshelve' }).then(function() {
+      log('команда принята! котик недоволен но просыпается…', 'ok');
+      startPolling();
+      setLoading(false);
+    }).catch(function(e) {
+      log('котик не проснулся: ' + e.message, 'err');
+      setCatState('unknown');
+      setLoading(false);
+    });
+  } else {
+    log('укладываем котика…');
+    setCatState('shelving');
+    apiPost('/api/gpu/action', { action: 'shelve' }).then(function() {
+      log('команда принята! котик уходит на полку…', 'ok');
+      startPolling();
+      setLoading(false);
+    }).catch(function(e) {
+      log('котик отказывается ложиться: ' + e.message, 'err');
+      setCatState('unknown');
+      setLoading(false);
+    });
+  }
+}
+
+refreshStatus();
+</script>
+</body>
+</html>
