@@ -3,3 +3,4 @@ node_modules/
 *.db-journal
 data/uploads/
 data/results/
+*.bak-*
