@@ -32,6 +32,36 @@
     overflow-x: hidden;
   }
 
+
+  /* Journal */
+  .event-row { display:flex; gap:12px; padding:10px 12px; border-bottom:1px solid var(--border); font-size:13px; align-items:flex-start; }
+  .event-row:hover { background: var(--surface2); }
+  .event-time { color:var(--text2); white-space:nowrap; min-width:130px; }
+  .event-badge { padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600; white-space:nowrap; }
+  .event-badge.upload { background:rgba(108,99,255,0.2); color:var(--accent); }
+  .event-badge.completed { background:rgba(74,222,128,0.2); color:var(--success); }
+  .event-badge.error { background:rgba(248,113,113,0.2); color:var(--error); }
+  .event-badge.stuck { background:rgba(251,191,36,0.2); color:var(--warn); }
+  .event-badge.gpu { background:rgba(255,107,157,0.2); color:var(--accent2); }
+  .event-badge.admin { background:rgba(108,99,255,0.15); color:#a5a0ff; }
+  .event-badge.download { background:rgba(74,222,128,0.15); color:#6ee7a0; }
+  .event-badge.system { background:rgba(136,136,170,0.2); color:var(--text2); }
+  .event-details { color:var(--text2); flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; }
+  .event-file { color:var(--text); font-weight:500; }
+  .journal-filters { display:flex; gap:8px; margin-bottom:16px; flex-wrap:wrap; align-items:center; }
+  .journal-filters select, .journal-filters input { background:var(--surface2); border:1px solid var(--border); color:var(--text); padding:6px 10px; border-radius:6px; font-size:13px; }
+  .control-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:10px; margin:16px 0; }
+  .control-btn { background:var(--surface2); border:1px solid var(--border); color:var(--text); padding:12px; border-radius:8px; cursor:pointer; text-align:center; font-size:13px; transition:all 0.2s; }
+  .control-btn:hover { border-color:var(--accent); background:rgba(108,99,255,0.1); }
+  .control-btn .ctrl-icon { font-size:20px; margin-bottom:4px; }
+  .control-btn .ctrl-label { font-weight:500; }
+  .current-job-card { background:var(--surface2); border:1px solid var(--border); border-radius:8px; padding:14px; margin:12px 0; }
+  .current-job-card.active { border-color:var(--accent); animation: pulse-border 2s infinite; }
+  @keyframes pulse-border { 0%,100% { border-color:var(--accent); } 50% { border-color:rgba(108,99,255,0.3); } }
+  .pending-list { margin:8px 0; }
+  .pending-item { display:flex; justify-content:space-between; padding:6px 12px; font-size:13px; border-bottom:1px solid var(--border); }
+  .pending-item:last-child { border-bottom:none; }
+
   /* Background pattern */
   body::before {
     content: '';
@@ -820,6 +850,7 @@
             <button class="tab" onclick="showAdminTab('all-jobs')">Все задания</button>
             <button class="tab" onclick="showAdminTab('stats')">📊 Статистика</button>
             <button class="tab" onclick="showAdminTab('monitor')">🖥️ Монитор</button>
+            <button class="tab" onclick="showAdminTab('journal')">📋 Журнал</button>
           </div>
 
           <div id="admin-tab-users" class="tab-content active">
@@ -874,6 +905,24 @@
               <div class="monitor-card"><div class="monitor-dot" id="dot-n8n"></div><div class="monitor-info"><div class="monitor-name">n8n</div><div class="monitor-sub" id="sub-n8n">проверяем...</div></div></div>
             </div>
 
+            <!-- Current Job -->
+            <div id="current-job-section" class="current-job-card" style="display:none">
+              <div style="display:flex;justify-content:space-between;align-items:center">
+                <div>
+                  <span style="font-size:12px;color:var(--text2)">Сейчас обрабатывается:</span>
+                  <div id="current-job-name" style="font-weight:600;margin-top:2px"></div>
+                </div>
+                <div id="current-job-timer" style="font-size:20px;font-weight:700;color:var(--accent);font-family:monospace"></div>
+              </div>
+              <div id="current-job-meta" style="font-size:12px;color:var(--text2);margin-top:6px"></div>
+            </div>
+
+            <!-- Pending Queue -->
+            <div id="pending-section" style="display:none;margin:12px 0">
+              <div style="font-size:12px;color:var(--text2);margin-bottom:6px;font-weight:600">Очередь ожидания:</div>
+              <div id="pending-list" class="pending-list" style="background:var(--surface);border-radius:6px;border:1px solid var(--border)"></div>
+            </div>
+
             <!-- Queue -->
             <div class="queue-grid">
               <div class="queue-card"><div class="queue-val" id="q-queued">—</div><div class="queue-lbl">В очереди</div></div>
@@ -887,6 +936,46 @@
               <div class="monitor-footer" id="monitor-checked-at"></div>
             </div>
 
+            <!-- Control Buttons -->
+            <div style="font-size:13px;font-weight:600;margin-top:20px;margin-bottom:8px;color:var(--text2)">Управление:</div>
+            <div class="control-grid">
+              <div class="control-btn" onclick="controlAction('reset-stuck')">
+                <div class="ctrl-icon">🔄</div>
+                <div class="ctrl-label">Сбросить зависшие</div>
+              </div>
+              <div class="control-btn" onclick="controlAction('clear-locks')">
+                <div class="ctrl-icon">🔓</div>
+                <div class="ctrl-label">Очистить lock-файлы</div>
+              </div>
+              <div class="control-btn" onclick="controlAction('reset-errors')">
+                <div class="ctrl-icon">♻️</div>
+                <div class="ctrl-label">Повторить ошибочные</div>
+              </div>
+            </div>
+
+          </div>
+          <div id="admin-tab-journal" class="tab-content">
+            <div class="journal-filters">
+              <select id="journal-filter-type" onchange="loadJournal()">
+                <option value="">Все события</option>
+                <option value="job.uploaded">📤 Загрузка</option>
+                <option value="job.completed">✅ Завершено</option>
+                <option value="job.error">❌ Ошибки</option>
+                <option value="job.stuck">⏰ Зависания</option>
+                <option value="job.downloaded">📥 Скачивания</option>
+                <option value="gpu">🖥️ GPU</option>
+                <option value="admin">🔧 Админ</option>
+              </select>
+              <button class="btn btn-outline btn-sm" onclick="loadJournal()">🔄 Обновить</button>
+              <button class="btn btn-outline btn-sm" onclick="archiveJournal()" style="margin-left:8px">📦 Архивировать и очистить</button>
+              <span id="journal-total" style="font-size:12px;color:var(--text2)"></span>
+            </div>
+            <div id="journal-list" style="background:var(--surface);border-radius:8px;border:1px solid var(--border);max-height:600px;overflow-y:auto">
+              <div style="text-align:center;padding:40px;color:var(--text2)">Загрузка...</div>
+            </div>
+            <div style="margin-top:12px;text-align:center">
+              <button class="btn btn-outline btn-sm" id="journal-load-more" onclick="loadJournalMore()" style="display:none">Загрузить ещё</button>
+            </div>
           </div>
         </div>
 
@@ -1007,6 +1096,7 @@ function showAdminTab(tab) {
   if (tab === 'stats')   loadStatsExtended();
   if (tab === 'monitor') { loadMonitor(); startMonitorRefresh(); }
   else stopMonitorRefresh();
+  if (tab === 'journal') { loadJournal(); }
 }
 
 async function loadStatsExtended() {
@@ -1145,6 +1235,35 @@ async function loadMonitor() {
     setQ('q-processing',  q.processing,  q.processing > 0 ? 'nonzero' : '');
     setQ('q-error-today', q.error_today, q.error_today > 0 ? 'error' : '');
     setQ('q-done-today',  q.completed_today, 'success');
+
+    // Current Job
+    const cjSection = document.getElementById('current-job-section');
+    if (d.current_job) {
+      cjSection.style.display = 'block';
+      cjSection.classList.add('active');
+      document.getElementById('current-job-name').textContent = d.current_job.original_name;
+      const elapsed = Math.round((Date.now() - new Date(d.current_job.created_at + 'Z').getTime()) / 60000);
+      document.getElementById('current-job-timer').textContent = elapsed + ' мин';
+      const meta = [];
+      if (d.current_job.diarize) meta.push('🎙️ диаризация');
+      if (d.current_job.user_name) meta.push('👤 ' + d.current_job.user_name);
+      if (d.lock_files && d.lock_files.length > 0) meta.push('🔒 lock активен');
+      document.getElementById('current-job-meta').textContent = meta.join(' · ');
+    } else {
+      cjSection.style.display = 'none';
+      cjSection.classList.remove('active');
+    }
+
+    // Pending Queue
+    const pendSec = document.getElementById('pending-section');
+    if (d.pending_jobs && d.pending_jobs.length > 0) {
+      pendSec.style.display = 'block';
+      document.getElementById('pending-list').innerHTML = d.pending_jobs.map((j, i) =>
+        '<div class="pending-item"><span>' + (i+1) + '. ' + j.original_name + (j.diarize ? ' 🎙️' : '') + '</span><span style="color:var(--text2)">' + j.user_name + '</span></div>'
+      ).join('');
+    } else {
+      pendSec.style.display = 'none';
+    }
 
     // Timestamp
     const ts = new Date(d.checked_at);
@@ -1728,6 +1847,116 @@ if (params.get('token')) {
       showPage('login');
       showAlert('login-alert', 'success', d.message || d.error);
     });
+}
+
+
+// ===== JOURNAL =====
+let journalOffset = 0;
+
+async function loadJournal() {
+  journalOffset = 0;
+  const type = document.getElementById('journal-filter-type').value;
+  const params = new URLSearchParams({ limit: 50, offset: 0 });
+  if (type) params.set('type', type);
+
+  try {
+    const d = await api('GET', '/api/admin/events?' + params);
+    const list = document.getElementById('journal-list');
+    if (!d.events || d.events.length === 0) {
+      list.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text2)">Нет событий</div>';
+      document.getElementById('journal-load-more').style.display = 'none';
+      document.getElementById('journal-total').textContent = '';
+      return;
+    }
+    list.innerHTML = d.events.map(renderEvent).join('');
+    journalOffset = d.events.length;
+    document.getElementById('journal-total').textContent = `Всего: ${d.total}`;
+    document.getElementById('journal-load-more').style.display = d.events.length < d.total ? '' : 'none';
+  } catch(e) {
+    console.error('Journal error:', e);
+  }
+}
+
+async function loadJournalMore() {
+  const type = document.getElementById('journal-filter-type').value;
+  const params = new URLSearchParams({ limit: 50, offset: journalOffset });
+  if (type) params.set('type', type);
+
+  try {
+    const d = await api('GET', '/api/admin/events?' + params);
+    const list = document.getElementById('journal-list');
+    list.innerHTML += d.events.map(renderEvent).join('');
+    journalOffset += d.events.length;
+    document.getElementById('journal-load-more').style.display = journalOffset < d.total ? '' : 'none';
+  } catch(e) { console.error(e); }
+}
+
+function renderEvent(ev) {
+  const ts = new Date(ev.timestamp + 'Z');
+  const timeStr = ts.toLocaleDateString('ru-RU', {day:'2-digit',month:'2-digit'}) + ' ' + ts.toLocaleTimeString('ru-RU', {hour:'2-digit',minute:'2-digit',second:'2-digit'});
+
+  const badgeMap = {
+    'job.uploaded': ['upload', '📤 Загрузка'],
+    'job.completed': ['completed', '✅ Готово'],
+    'job.error': ['error', '❌ Ошибка'],
+    'job.stuck': ['stuck', '⏰ Зависание'],
+    'job.downloaded': ['download', '📥 Скачано'],
+    'gpu.shelve': ['gpu', '⏸ Shelve'],
+    'gpu.unshelve': ['gpu', '▶ Unshelve'],
+    'admin.reset_stuck': ['admin', '🔄 Сброс зависших'],
+    'admin.clear_locks': ['admin', '🔓 Очистка locks'],
+    'admin.reset_errors': ['admin', '♻️ Сброс ошибок'],
+    'service.restart': ['system', '🔧 Перезапуск'],
+  };
+
+  const [badgeCls, badgeLabel] = badgeMap[ev.event_type] || ['system', ev.event_type];
+  let details = '';
+  try {
+    const d = JSON.parse(ev.details || '{}');
+    const fileName = ev.original_name || d.original_name || '';
+    if (fileName) details += '<span class="event-file">' + fileName + '</span> ';
+    if (d.size_mb) details += d.size_mb + ' МБ ';
+    if (d.diarize) details += '🎙️ ';
+    if (d.format) details += '(' + d.format + ') ';
+    if (d.count) details += 'x' + d.count + ' ';
+    if (d.removed !== undefined) details += d.removed + ' файлов ';
+    if (ev.user_name) details += '<span style="color:var(--text2)">— ' + ev.user_name + '</span>';
+  } catch(e) {
+    details = ev.details || '';
+  }
+
+  return '<div class="event-row">' +
+    '<span class="event-time">' + timeStr + '</span>' +
+    '<span class="event-badge ' + badgeCls + '">' + badgeLabel + '</span>' +
+    '<span class="event-details">' + details + '</span>' +
+  '</div>';
+}
+
+// ===== CONTROL ACTIONS =====
+async function controlAction(action) {
+  const labels = {
+    'reset-stuck': 'Сбросить зависшие задания в очередь?',
+    'clear-locks': 'Удалить все lock-файлы?',
+    'reset-errors': 'Поставить ошибочные задания обратно в очередь?'
+  };
+  if (!confirm(labels[action] || action)) return;
+  try {
+    const d = await api('POST', '/api/admin/control/' + action);
+    alert(JSON.stringify(d, null, 2));
+    loadMonitor();
+  } catch(e) {
+    alert('Ошибка: ' + e.message);
+  }
+}
+
+
+async function archiveJournal() {
+  if (!confirm('Заархивировать все события в файл и очистить журнал?')) return;
+  try {
+    const d = await api('POST', '/api/admin/control/archive-journal');
+    alert('Заархивировано: ' + d.archived + ' событий\nФайл: ' + d.file);
+    loadJournal();
+  } catch(e) { alert('Ошибка: ' + e.message); }
 }
 </script>
 </body>

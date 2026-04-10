@@ -100,6 +100,19 @@ db.exec(`
     key TEXT PRIMARY KEY,
     value TEXT
   );
+  CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT DEFAULT (datetime('now')),
+    event_type TEXT NOT NULL,
+    job_id TEXT,
+    user_id TEXT,
+    details TEXT,
+    source TEXT DEFAULT 'web'
+  );
+  CREATE INDEX IF NOT EXISTS idx_events_ts ON events(timestamp);
+  CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type);
+  CREATE INDEX IF NOT EXISTS idx_events_job ON events(job_id);
+
 
   CREATE TABLE IF NOT EXISTS prompts (
     id TEXT PRIMARY KEY,
@@ -192,6 +205,18 @@ if (promptCount === 0) {
   });
 
   console.log('Default prompt profiles created');
+}
+
+
+// ===== EVENT LOG =====
+function logEvent(eventType, jobId = null, userId = null, details = null, source = 'web') {
+  try {
+    db.prepare(
+      'INSERT INTO events (event_type, job_id, user_id, details, source) VALUES (?, ?, ?, ?, ?)'
+    ).run(eventType, jobId, userId, typeof details === 'object' ? JSON.stringify(details) : details, source);
+  } catch (e) {
+    console.error('[logEvent]', e.message);
+  }
 }
 
 // ===== EMAIL =====
@@ -436,6 +461,12 @@ app.post('/api/jobs/upload', authMiddleware, upload.single('file'), async (req, 
 
   processJob(jobId, req.file.filename, req.file.path).catch(console.error);
 
+  logEvent('job.uploaded', jobId, req.user.id, {
+    original_name: req.file.originalname,
+    size_mb: Math.round(req.file.size / 1024 / 1024 * 10) / 10,
+    diarize,
+    prompt_id: promptId
+  });
   res.json({ jobId, message: 'Файл загружен и поставлен в очередь' });
 });
 
@@ -683,6 +714,7 @@ ${toParas(cleanText)}
   if (!content) return res.status(404).json({ error: 'Результат не готов' });
   res.setHeader('Content-Type', 'text/plain; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="${safeAscii}.${format}"; filename*=UTF-8''${encodedBase}.${format}`);
+  logEvent('job.downloaded', id, req.user.id, { format }, 'web');
   res.send(content);
 });
 
@@ -693,6 +725,7 @@ app.delete('/api/jobs/:id', authMiddleware, (req, res) => {
   const filePath = path.join(UPLOAD_PATH, job.filename);
   if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
 
+  logEvent('job.deleted', req.params.id, req.user.id, { original_name: job.original_name });
   db.prepare('DELETE FROM jobs WHERE id = ?').run(req.params.id);
   res.json({ message: 'Задание удалено' });
 });
@@ -796,6 +829,11 @@ app.post('/api/internal/job-result', (req, res) => {
     `);
   }
 
+  logEvent('job.completed', job.id, job.user_id, {
+    original_name: job.original_name,
+    has_srt: !!result_srt,
+    has_clean: !!result_clean
+  }, 'n8n');
   res.json({ ok: true });
 });
 
@@ -1052,6 +1090,7 @@ app.post('/api/gpu/action', adminMiddleware, async (req, res) => {
   }
   try {
     await gpuDoAction(action);
+    logEvent('gpu.' + action, null, req.user.id);
     res.json({ ok: true, action });
   } catch (e) {
     console.error('[GPU]', e.message);
@@ -1158,6 +1197,27 @@ app.get('/api/admin/monitor', adminMiddleware, async (req, res) => {
     completed_today: db.prepare("SELECT COUNT(*) as c FROM jobs WHERE status='completed' AND date(completed_at)=date('now')").get().c,
   };
 
+  // Текущий обрабатываемый файл
+  const currentJob = db.prepare(`
+    SELECT j.id, j.original_name, j.diarize, j.created_at, u.name as user_name
+    FROM jobs j JOIN users u ON j.user_id = u.id
+    WHERE j.status IN ('processing', 'queued')
+    ORDER BY j.created_at ASC LIMIT 1
+  `).get() || null;
+
+  // Ожидающие файлы
+  const pendingJobs = db.prepare(`
+    SELECT j.id, j.original_name, j.diarize, j.created_at, u.name as user_name
+    FROM jobs j JOIN users u ON j.user_id = u.id
+    WHERE j.status = 'pending'
+    ORDER BY j.created_at ASC LIMIT 20
+  `).all();
+
+  // Lock-файлы
+  const lockFiles = fs.existsSync(RESULTS_PATH)
+    ? fs.readdirSync(RESULTS_PATH).filter(f => f.endsWith('.lock'))
+    : [];
+
   res.json({
     services: {
       whisper:  whisper.status  === 'fulfilled' ? whisper.value  : { ok: false, error: whisper.reason?.message },
@@ -1167,8 +1227,126 @@ app.get('/api/admin/monitor', adminMiddleware, async (req, res) => {
     },
     gpu: gpuStatus.status === 'fulfilled' ? gpuStatus.value : 'UNKNOWN',
     queue,
+    current_job: currentJob,
+    pending_jobs: pendingJobs,
+    lock_files: lockFiles,
     checked_at: new Date().toISOString()
   });
+});
+
+
+// ===== EVENT LOG API =====
+app.get('/api/admin/events', adminMiddleware, (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit || '100'), 500);
+  const offset = parseInt(req.query.offset || '0');
+  const eventType = req.query.type || null;
+  const jobId = req.query.job_id || null;
+
+  let where = '1=1';
+  const params = [];
+  if (eventType) { where += ' AND event_type LIKE ?'; params.push(eventType + '%'); }
+  if (jobId) { where += ' AND job_id = ?'; params.push(jobId); }
+
+  const events = db.prepare(`
+    SELECT e.*, j.original_name, u.name as user_name, u.email as user_email
+    FROM events e
+    LEFT JOIN jobs j ON e.job_id = j.id
+    LEFT JOIN users u ON e.user_id = u.id
+    WHERE ${where}
+    ORDER BY e.timestamp DESC
+    LIMIT ? OFFSET ?
+  `).all(...params, limit, offset);
+
+  const total = db.prepare(`SELECT COUNT(*) as c FROM events WHERE ${where}`).all(...params)[0].c;
+  res.json({ events, total, limit, offset });
+});
+
+
+// ===== ADMIN CONTROL =====
+app.post('/api/admin/control/reset-stuck', adminMiddleware, (req, res) => {
+  const stuck = db.prepare(
+    "SELECT id, original_name FROM jobs WHERE status IN ('processing', 'pending', 'queued') AND created_at < datetime('now', '-2 hours')"
+  ).all();
+  if (stuck.length === 0) return res.json({ reset: 0, message: 'Нет зависших заданий' });
+
+  const ids = stuck.map(j => j.id);
+  db.prepare(
+    "UPDATE jobs SET status='pending', error=NULL, completed_at=NULL WHERE id IN (" + ids.map(() => '?').join(',') + ")"
+  ).run(...ids);
+
+  // Удаляем lock-файлы
+  const lockDir = RESULTS_PATH;
+  if (fs.existsSync(lockDir)) {
+    fs.readdirSync(lockDir).filter(f => f.endsWith('.lock')).forEach(f => {
+      try { fs.unlinkSync(path.join(lockDir, f)); } catch(e) {}
+    });
+  }
+
+  logEvent('admin.reset_stuck', null, req.user.id, { count: stuck.length, jobs: stuck.map(j => j.original_name) });
+  res.json({ reset: stuck.length, jobs: stuck });
+});
+
+app.post('/api/admin/control/clear-locks', adminMiddleware, (req, res) => {
+  const lockDir = RESULTS_PATH;
+  let removed = 0;
+  if (fs.existsSync(lockDir)) {
+    fs.readdirSync(lockDir).filter(f => f.endsWith('.lock')).forEach(f => {
+      try { fs.unlinkSync(path.join(lockDir, f)); removed++; } catch(e) {}
+    });
+  }
+  logEvent('admin.clear_locks', null, req.user.id, { removed });
+  res.json({ removed });
+});
+
+app.post('/api/admin/control/reset-errors', adminMiddleware, (req, res) => {
+  const errors = db.prepare("SELECT id, original_name FROM jobs WHERE status='error'").all();
+  if (errors.length === 0) return res.json({ reset: 0, message: 'Нет заданий с ошибками' });
+
+  db.prepare("UPDATE jobs SET status='pending', error=NULL, completed_at=NULL WHERE status='error'").run();
+
+  logEvent('admin.reset_errors', null, req.user.id, { count: errors.length });
+  res.json({ reset: errors.length });
+});
+
+// Watchdog на GPU → присылает события
+app.post('/api/internal/watchdog-event', (req, res) => {
+  const authHeader = req.headers['authorization'] || '';
+  if (!authHeader.startsWith('Bearer ')) return res.status(401).json({ error: 'Unauthorized' });
+  try { jwt.verify(authHeader.slice(7), JWT_SECRET); } catch(e) { return res.status(401).json({ error: 'Invalid token' }); }
+
+  const { event_type, details, source } = req.body;
+  if (!event_type) return res.status(400).json({ error: 'event_type required' });
+
+  logEvent(event_type, null, null, details, source || 'watchdog');
+
+  // Email-алерт для критических событий
+  if (event_type.includes('critical') || event_type === 'service.restart') {
+    const adminUser = db.prepare("SELECT email FROM users WHERE role='admin' LIMIT 1").get();
+    if (adminUser) {
+      sendEmail(adminUser.email, '⚠️ GPU Watchdog: ' + event_type, '<pre>' + JSON.stringify(req.body, null, 2) + '</pre>');
+    }
+  }
+
+  res.json({ ok: true });
+});
+
+
+app.post('/api/admin/control/archive-journal', adminMiddleware, (req, res) => {
+  const events = db.prepare('SELECT * FROM events ORDER BY timestamp ASC').all();
+  if (events.length === 0) return res.json({ archived: 0, message: 'Журнал пуст' });
+
+  // Сохраняем в файл
+  const archiveDir = path.join(RESULTS_PATH, 'archives');
+  if (!fs.existsSync(archiveDir)) fs.mkdirSync(archiveDir, { recursive: true });
+  const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const archivePath = path.join(archiveDir, 'events_' + ts + '.json');
+  fs.writeFileSync(archivePath, JSON.stringify(events, null, 2));
+
+  // Очищаем таблицу
+  db.prepare('DELETE FROM events').run();
+  logEvent('admin.archive_journal', null, req.user.id, { archived: events.length, file: archivePath });
+
+  res.json({ archived: events.length, file: 'events_' + ts + '.json' });
 });
 
 // ===== CLEANUP =====
@@ -1187,7 +1365,7 @@ setInterval(cleanupExpiredJobs, 60 * 60 * 1000);
 // ===== STUCK JOBS =====
 
 function checkStuckJobs() {
-  const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+  const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString().replace('T',' ').replace('Z','');
   const stuck = db.prepare(`
     SELECT * FROM jobs
     WHERE status IN ('processing', 'pending', 'queued')
@@ -1202,6 +1380,7 @@ function checkStuckJobs() {
       WHERE id=?
     `).run(job.id);
     console.warn(`[STUCK] Job ${job.id} (${job.original_name}) → error (timeout)`);
+    logEvent('job.stuck', job.id, job.user_id, { original_name: job.original_name }, 'system');
   });
 
   // Email-алерт администратору
