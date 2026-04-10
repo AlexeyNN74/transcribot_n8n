@@ -1362,9 +1362,6 @@ async function doUpload() {
 // ===== JOBS =====
 async function loadJobs() {
   const container = document.getElementById('jobs-container');
-  if (!container.children.length || container.querySelector('.empty-state')) {
-    container.innerHTML = '<div style="text-align:center;padding:40px"><span class="spinner"></span></div>';
-  }
 
   try {
     const jobs = await api('GET', '/api/jobs');
