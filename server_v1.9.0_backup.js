@@ -1,7 +1,7 @@
 // Студия Транскрибации — server.js
-// Version: 1.9.3
+// Version: 1.9.0
 // Updated: 2026-04-10
-// Changes: security hardening + null stats fix
+// Changes: file type validation (magic bytes), video size limits per user
 'use strict';
 
 // ================================================================
@@ -36,12 +36,6 @@ const path = require('path');
 const fs = require('fs');
 const rateLimit = require('express-rate-limit');
 
-// ===== SECURITY HELPERS =====
-function escapeHtml(s) {
-  if (!s) return '';
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-}
-
 const app = express();
 const PORT = process.env.PORT || 3000;
 const DB_PATH = process.env.DB_PATH || '/data/db/transcribe.db';
@@ -49,8 +43,7 @@ const UPLOAD_PATH = process.env.UPLOAD_PATH || '/data/uploads';
 const RESULTS_PATH = process.env.RESULTS_PATH || '/data/results';
 const GPU_SERVER_URL = process.env.GPU_SERVER_URL || '';
 const GPU_API_KEY = process.env.GPU_SERVER_API_KEY || '';
-const JWT_SECRET = process.env.JWT_SECRET;
-if (!JWT_SECRET) { console.error('FATAL: JWT_SECRET environment variable is not set!'); process.exit(1); }
+const JWT_SECRET = process.env.JWT_SECRET || 'change_me';
 const APP_URL = process.env.APP_URL || 'http://localhost:3000';
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || '';
 
@@ -357,7 +350,7 @@ app.post('/api/auth/register', async (req, res) => {
   const activationUrl = `${APP_URL}/activate?token=${activationToken}`;
 
   await sendEmail(email, 'Активация аккаунта — Студия Транскрибации', `
-    <h2>Добро пожаловать, ${escapeHtml(name)}!</h2>
+    <h2>Добро пожаловать, ${name}!</h2>
     <p>Для активации аккаунта перейдите по ссылке:</p>
     <a href="${activationUrl}" style="background:#4F46E5;color:white;padding:12px 24px;text-decoration:none;border-radius:6px;display:inline-block">Активировать аккаунт</a>
     <p>Ссылка действительна 24 часа.</p>
@@ -366,8 +359,8 @@ app.post('/api/auth/register', async (req, res) => {
 
   await sendEmail(ADMIN_EMAIL, 'Новая регистрация — Студия Транскрибации', `
     <h2>Новый пользователь</h2>
-    <p>Email: ${escapeHtml(email)}</p>
-    <p>Имя: ${escapeHtml(name)}</p>
+    <p>Email: ${email}</p>
+    <p>Имя: ${name}</p>
     <p><a href="${APP_URL}/admin">Открыть админку</a></p>
   `);
 
@@ -462,27 +455,11 @@ app.delete('/api/prompts/:id', authMiddleware, (req, res) => {
 
 app.post('/api/jobs/upload', authMiddleware, upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'Файл не загружен' });
-  // Проверка реального типа файла по magic bytes
-  const realType = detectFileType(req.file.path);
-  if (realType === 'unknown') {
-    fs.unlinkSync(req.file.path);
-    return res.status(400).json({ error: 'Файл повреждён или имеет неподдерживаемый формат. Допустимы: MP3, WAV, OGG, FLAC, M4A, AAC, WMA, MP4, MKV, AVI, MOV, WebM' });
-  }
-  // Лимит размера для видео
-  if (realType === 'video') {
-    const userRow = db.prepare('SELECT video_limit_mb FROM users WHERE id = ?').get(req.user.id);
-    const limitMb = (userRow && userRow.video_limit_mb) || 200;
-    const fileMb = req.file.size / (1024 * 1024);
-    if (fileMb > limitMb) {
-      fs.unlinkSync(req.file.path);
-      return res.status(400).json({ error: `Видеофайл слишком большой (${Math.round(fileMb)} МБ). Максимум для видео: ${limitMb} МБ. Для аудио ограничений нет.` });
-    }
-  }
 
   // Исправляем кодировку имени файла (браузер шлёт UTF-8, multer читает как latin1)
   const originalName = Buffer.from(req.file.originalname, 'latin1').toString('utf8');
 
-  const keepDays = Math.min(Math.max(parseInt(req.body.keep_days) || 7, 1), 90);
+  const keepDays = parseInt(req.body.keep_days || '7');
   const jobId = uuidv4();
   const expiresAt = new Date(Date.now() + keepDays * 24 * 60 * 60 * 1000).toISOString();
 
@@ -576,18 +553,11 @@ app.put('/api/jobs/:id/rating', authMiddleware, (req, res) => {
 function getTranscript(job) {
   if (job.result_clean && job.result_clean.trim()) return job.result_clean.trim();
   if (job.result_srt && job.result_srt.trim()) {
-    // Убираем SRT-разметку и склеиваем в абзацы
-    const lines = job.result_srt
+    // Убираем SRT-разметку: номер, таймкоды
+    return job.result_srt
       .replace(/^\d+\n[\d:,]+ --> [\d:,]+\n/gm, '')
-      .split('\n').map(l => l.trim()).filter(l => l.length > 0);
-    const paragraphs = [];
-    let cur = '';
-    for (const line of lines) {
-      cur = cur ? cur + ' ' + line : line;
-      if (/[.!?]\s*$/.test(line)) { paragraphs.push(cur); cur = ''; }
-    }
-    if (cur) paragraphs.push(cur);
-    return paragraphs.join('\n\n');
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
   }
   return '';
 }
@@ -803,12 +773,27 @@ app.delete('/api/jobs/:id', authMiddleware, (req, res) => {
   const job = db.prepare('SELECT * FROM jobs WHERE id = ? AND user_id = ?').get(req.params.id, req.user.id);
   if (!job) return res.status(404).json({ error: 'Задание не найдено' });
 
-  const filePath = path.join(UPLOAD_PATH, path.basename(job.filename));
-  if (filePath.startsWith(UPLOAD_PATH) && fs.existsSync(filePath)) fs.unlinkSync(filePath);
+  const filePath = path.join(UPLOAD_PATH, job.filename);
+  if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
 
   logEvent('job.deleted', req.params.id, req.user.id, { original_name: job.original_name });
   db.prepare('DELETE FROM jobs WHERE id = ?').run(req.params.id);
   res.json({ message: 'Задание удалено' });
+});
+
+
+// Изменить лимит видео для пользователя (админ)
+app.put('/api/admin/users/:id/video-limit', adminMiddleware, (req, res) => {
+  const limitMb = parseInt(req.body.video_limit_mb);
+  if (!limitMb || limitMb < 0 || limitMb > 3000) {
+    return res.status(400).json({ error: 'Лимит должен быть от 0 до 3000 МБ' });
+  }
+  const user = db.prepare('SELECT id, email FROM users WHERE id = ?').get(req.params.id);
+  if (!user) return res.status(404).json({ error: 'Пользователь не найден' });
+
+  db.prepare('UPDATE users SET video_limit_mb = ? WHERE id = ?').run(limitMb, req.params.id);
+  logEvent('admin.video_limit', null, req.user.id, { target_user: user.email, limit_mb: limitMb });
+  res.json({ ok: true, video_limit_mb: limitMb });
 });
 
 
@@ -844,8 +829,8 @@ app.post('/api/webhook/result', (req, res) => {
     const job = db.prepare('SELECT j.*, u.email, u.name FROM jobs j JOIN users u ON j.user_id=u.id WHERE j.id=?').get(jobId);
     if (job) {
       sendEmail(job.email, 'Транскрипция готова!', `
-        <h2>Привет, ${escapeHtml(job.name)}!</h2>
-        <p>Транскрипция файла <b>${escapeHtml(job.original_name)}</b> готова.</p>
+        <h2>Привет, ${job.name}!</h2>
+        <p>Транскрипция файла <b>${job.original_name}</b> готова.</p>
         <a href="${APP_URL}/dashboard" style="background:#4F46E5;color:white;padding:12px 24px;text-decoration:none;border-radius:6px;display:inline-block">Скачать результат</a>
         <p>Файл будет доступен ${job.keep_days} дней.</p>
       `);
@@ -917,8 +902,8 @@ app.post('/api/internal/job-result', (req, res) => {
   ).get(filename);
   if (fullJob) {
     sendEmail(fullJob.email, 'Транскрипция готова!', `
-      <h2>Привет, ${escapeHtml(fullJob.name)}!</h2>
-      <p>Транскрипция файла <b>${escapeHtml(fullJob.original_name)}</b> готова.</p>
+      <h2>Привет, ${fullJob.name}!</h2>
+      <p>Транскрипция файла <b>${fullJob.original_name}</b> готова.</p>
       <a href="${APP_URL}/dashboard" style="background:#4F46E5;color:white;padding:12px 24px;
         text-decoration:none;border-radius:6px;display:inline-block">Открыть результат</a>
       <p>Файл будет доступен ${fullJob.keep_days} дней.</p>
@@ -951,7 +936,7 @@ app.put('/api/admin/users/:id/activate', adminMiddleware, async (req, res) => {
   db.prepare('UPDATE users SET active = 1, activation_token = NULL WHERE id = ?').run(req.params.id);
 
   await sendEmail(user.email, 'Ваш аккаунт активирован!', `
-    <h2>Добро пожаловать, ${escapeHtml(user.name)}!</h2>
+    <h2>Добро пожаловать, ${user.name}!</h2>
     <p>Ваш аккаунт активирован. Теперь вы можете загружать файлы для транскрибации.</p>
     <a href="${APP_URL}" style="background:#4F46E5;color:white;padding:12px 24px;text-decoration:none;border-radius:6px;display:inline-block">Войти</a>
   `);
@@ -1075,7 +1060,7 @@ app.get('/api/health', (req, res) => {
     const queued      = db.prepare("SELECT COUNT(*) as c FROM jobs WHERE status='queued'").get().c;
     res.json({
       ok: true,
-      version: '1.9.3',
+      version: '1.8.1',
       uptime_s: Math.floor(process.uptime()),
       db: dbOk,
       queue: { queued, pending, processing }
@@ -1243,14 +1228,14 @@ app.get('/api/admin/stats/extended', adminMiddleware, (req, res) => {
 
   res.json({
     totals: {
-      jobs_total:     totals.jobs_total || 0,
-      jobs_completed: totals.jobs_completed || 0,
-      jobs_error:     totals.jobs_error || 0,
+      jobs_total:     totals.jobs_total,
+      jobs_completed: totals.jobs_completed,
+      jobs_error:     totals.jobs_error,
       total_min:      Math.round((totals.total_sec || 0) / 60),
       month_min:      Math.round(month_sec / 60),
       week_jobs,
-      avg_min:        totals.avg_sec ? Math.round(totals.avg_sec / 60 * 10) / 10 : 0,
-      error_rate:     totals.jobs_total > 0 ? Math.round((totals.jobs_error || 0) / totals.jobs_total * 100) : 0,
+      avg_min:        totals.avg_sec ? Math.round(totals.avg_sec / 60 * 10) / 10 : null,
+      error_rate:     totals.jobs_total > 0 ? Math.round(totals.jobs_error / totals.jobs_total * 100) : 0,
     },
     by_day: byDay,
     top_users: topUsers
@@ -1450,8 +1435,8 @@ app.post('/api/admin/control/archive-journal', adminMiddleware, (req, res) => {
 function cleanupExpiredJobs() {
   const expired = db.prepare("SELECT * FROM jobs WHERE expires_at < datetime('now') AND status='completed'").all();
   expired.forEach(job => {
-    const filePath = path.join(UPLOAD_PATH, path.basename(job.filename));
-    if (filePath.startsWith(UPLOAD_PATH) && fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    const filePath = path.join(UPLOAD_PATH, job.filename);
+    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
     db.prepare('DELETE FROM jobs WHERE id = ?').run(job.id);
     console.log(`Cleaned up expired job: ${job.id}`);
   });
@@ -1483,7 +1468,7 @@ function checkStuckJobs() {
   const adminUser = db.prepare("SELECT email FROM users WHERE role='admin' LIMIT 1").get();
   if (adminUser) {
     const list = stuck.map(j =>
-      `<li><b>${escapeHtml(j.original_name)}</b> — создан ${j.created_at}, статус был: ${j.status}</li>`
+      `<li><b>${j.original_name}</b> — создан ${j.created_at}, статус был: ${j.status}</li>`
     ).join('');
     sendEmail(
       adminUser.email,
@@ -1509,15 +1494,6 @@ if (!adminExists) {
   console.log('CHANGE THE PASSWORD IMMEDIATELY!');
 }
 
-const server = app.listen(PORT, () => {
-  console.log(`Transcribe Studio v1.9.3 running on port ${PORT}`);
-});
-
-// Graceful shutdown
-process.on('SIGTERM', () => {
-  console.log('SIGTERM received, shutting down...');
-  server.close(() => {
-    db.close();
-    process.exit(0);
-  });
+app.listen(PORT, () => {
+  console.log(`Transcribe Studio running on port ${PORT}`);
 });

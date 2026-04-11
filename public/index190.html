@@ -478,64 +478,6 @@
     .main-content { padding: 16px; }
   }
 
-  /* ===== NOTIFICATION MODAL ===== */
-  #notify-modal {
-    position: fixed;
-    inset: 0;
-    background: rgba(0,0,0,0.7);
-    backdrop-filter: blur(4px);
-    z-index: 2000;
-    display: none;
-    align-items: center;
-    justify-content: center;
-  }
-  #notify-modal.show { display: flex; }
-  .notify-box {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 16px;
-    padding: 32px;
-    width: 90%;
-    max-width: 440px;
-    text-align: center;
-  }
-  .notify-icon { font-size: 48px; margin-bottom: 16px; }
-  .notify-title {
-    font-family: 'Unbounded', sans-serif;
-    font-size: 16px;
-    font-weight: 700;
-    margin-bottom: 12px;
-  }
-  .notify-msg {
-    font-size: 14px;
-    color: var(--text2);
-    line-height: 1.6;
-    white-space: pre-wrap;
-    word-break: break-word;
-    max-height: 300px;
-    overflow-y: auto;
-    margin-bottom: 24px;
-  }
-  .notify-btn {
-    padding: 10px 32px;
-    border-radius: 8px;
-    border: none;
-    cursor: pointer;
-    font-family: 'Golos Text', sans-serif;
-    font-size: 14px;
-    font-weight: 600;
-    color: white;
-    background: var(--accent);
-    transition: background 0.2s;
-  }
-  .notify-btn:hover { background: #7c74ff; }
-  .notify-box.error .notify-title { color: var(--error); }
-  .notify-box.error .notify-btn { background: var(--error); }
-  .notify-box.error .notify-btn:hover { background: #e85d5d; }
-  .notify-box.success .notify-title { color: var(--success); }
-  .notify-box.success .notify-btn { background: var(--success); }
-  .notify-box.success .notify-btn:hover { background: #3cc470; }
-
   /* ===== SPINNER ===== */
   .spinner {
     width: 20px; height: 20px;
@@ -833,7 +775,7 @@
             <div class="upload-zone" id="upload-zone" onclick="document.getElementById('file-input').click()" ondragover="handleDragOver(event)" ondrop="handleDrop(event)" ondragleave="this.classList.remove('dragover')">
               <div class="upload-zone-icon">📁</div>
               <div class="upload-zone-title">Перетащите файлы или нажмите для выбора</div>
-              <div class="upload-zone-hint">MP4, MP3, WAV, M4A, AVI, MOV, MKV, WEBM, OGG, FLAC — до 2GB</div>
+              <div class="upload-zone-hint">MP4, MP3, WAV, M4A, AVI, MOV, MKV, WEBM, OGG, FLAC — аудио без лимита, видео до 200 МБ</div>
               <div id="selected-file" style="margin-top:12px;font-weight:600;color:var(--accent)"></div>
             </div>
             <input type="file" id="file-input" accept=".mp4,.mp3,.wav,.m4a,.avi,.mov,.mkv,.webm,.ogg,.flac" multiple style="display:none" onchange="handleFileSelect(this)">
@@ -1338,7 +1280,7 @@ async function gpuAction(action) {
   try {
     await api('POST', '/api/gpu/action', { action });
     setTimeout(loadMonitor, 2000);
-  } catch (e) { showNotify(e.message); }
+  } catch (e) { alert(e.message); }
 }
 
 
@@ -1694,7 +1636,7 @@ async function activateUser(id) {
   try {
     await api('PUT', `/api/admin/users/${id}/activate`);
     loadUsers(); loadStats();
-  } catch (e) { showNotify(e.message); }
+  } catch (e) { alert(e.message); }
 }
 
 async function deactivateUser(id) {
@@ -1702,7 +1644,7 @@ async function deactivateUser(id) {
   try {
     await api('PUT', `/api/admin/users/${id}/deactivate`);
     loadUsers(); loadStats();
-  } catch (e) { showNotify(e.message); }
+  } catch (e) { alert(e.message); }
 }
 
 async function deleteUser(id) {
@@ -1710,7 +1652,7 @@ async function deleteUser(id) {
   try {
     await api('DELETE', `/api/admin/users/${id}`);
     loadUsers(); loadStats();
-  } catch (e) { showNotify(e.message); }
+  } catch (e) { alert(e.message); }
 }
 
 async function loadAllJobs() {
@@ -1746,7 +1688,7 @@ async function adminDeleteJob(id) {
   try {
     await api('DELETE', `/api/admin/jobs/${id}`);
     loadAllJobs(); loadStats();
-  } catch (e) { showNotify(e.message); }
+  } catch (e) { alert(e.message); }
 }
 
 // ===== PROFILES =====
@@ -1816,7 +1758,7 @@ async function downloadFile(jobId, format) {
   const res = await fetch(`/api/jobs/${jobId}/download/${format}`, {
     headers: { 'Authorization': `Bearer ${token}` }
   });
-  if (!res.ok) { showNotify('Ошибка скачивания'); return; }
+  if (!res.ok) { alert('Ошибка скачивания'); return; }
   const blob = await res.blob();
   const cd = res.headers.get('content-disposition') || '';
   const match = cd.match(/filename\*=UTF-8''([^;]+)/i) || cd.match(/filename="([^"]+)"/i);
@@ -1861,7 +1803,7 @@ async function viewJob(id) {
 
     showModalTab('summary');
     document.getElementById('job-modal').classList.add('show');
-  } catch(e) { showNotify(e.message); }
+  } catch(e) { alert(e.message); }
 }
 
 function closeJobModal() {
@@ -1880,7 +1822,7 @@ async function rateJob(id, rating) {
   try {
     await api('PUT', `/api/jobs/${id}/rating`, { rating });
     viewJob(id); // обновляем звёздочки
-  } catch(e) { showNotify(e.message); }
+  } catch(e) { alert(e.message); }
 }
 
 // ===== HELPERS =====
@@ -1899,22 +1841,6 @@ function formatDate(str) {
 function statusLabel(s) {
   const labels = { pending: 'Ожидает', queued: 'В очереди', processing: 'Обработка', completed: 'Готово', error: 'Ошибка' };
   return labels[s] || s;
-}
-
-// ===== NOTIFICATION MODAL =====
-function showNotify(msg, type = 'error') {
-  const icons = { error: '⚠️', success: '✅', info: 'ℹ️' };
-  const titles = { error: 'Ошибка', success: 'Готово', info: 'Информация' };
-  document.getElementById('notify-icon').textContent = icons[type] || icons.info;
-  document.getElementById('notify-title').textContent = titles[type] || titles.info;
-  document.getElementById('notify-msg').textContent = msg;
-  const box = document.getElementById('notify-box');
-  box.className = 'notify-box ' + type;
-  document.getElementById('notify-modal').classList.add('show');
-}
-
-function closeNotify() {
-  document.getElementById('notify-modal').classList.remove('show');
 }
 
 // ===== INIT =====
@@ -2024,10 +1950,10 @@ async function controlAction(action) {
   if (!confirm(labels[action] || action)) return;
   try {
     const d = await api('POST', '/api/admin/control/' + action);
-    showNotify(JSON.stringify(d, null, 2), 'success');
+    alert(JSON.stringify(d, null, 2));
     loadMonitor();
   } catch(e) {
-    showNotify(e.message);
+    alert('Ошибка: ' + e.message);
   }
 }
 
@@ -2036,20 +1962,10 @@ async function archiveJournal() {
   if (!confirm('Заархивировать все события в файл и очистить журнал?')) return;
   try {
     const d = await api('POST', '/api/admin/control/archive-journal');
-    showNotify('Заархивировано: ' + d.archived + ' событий\nФайл: ' + d.file, 'success');
+    alert('Заархивировано: ' + d.archived + ' событий\nФайл: ' + d.file);
     loadJournal();
-  } catch(e) { showNotify(e.message); }
+  } catch(e) { alert('Ошибка: ' + e.message); }
 }
 </script>
-<!-- Notification Modal -->
-<div id="notify-modal" onclick="if(event.target===this)closeNotify()">
-  <div class="notify-box" id="notify-box">
-    <div class="notify-icon" id="notify-icon"></div>
-    <div class="notify-title" id="notify-title"></div>
-    <div class="notify-msg" id="notify-msg"></div>
-    <button class="notify-btn" onclick="closeNotify()">ОК</button>
-  </div>
-</div>
-
 </body>
 </html>
