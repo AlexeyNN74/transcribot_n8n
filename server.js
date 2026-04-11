@@ -1067,6 +1067,8 @@ app.delete('/api/admin/prompts/:id', adminMiddleware, (req, res) => {
 
 // ===== HEALTH =====
 
+app.get("/api/version", (req, res) => res.json({ version: "1.9.5", node: process.version, uptime_s: Math.floor(process.uptime()) }));
+
 app.get('/api/health', (req, res) => {
   try {
     const dbOk = !!db.prepare('SELECT 1').get();
