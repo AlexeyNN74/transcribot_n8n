@@ -1,7 +1,8 @@
 // Студия Транскрибации — server.js (модульный)
-// Version: 1.9.6
-// Updated: 2026-04-11
 'use strict';
+// Version: 1.9.8
+// Updated: 2026-04-11
+
 
 const express = require('express');
 const path = require('path');

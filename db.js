@@ -1,4 +1,7 @@
 'use strict';
+// Version: 1.9.8
+// Updated: 2026-04-11
+
 const Database = require('better-sqlite3');
 const { v4: uuidv4 } = require('uuid');
 const { DB_PATH } = require('./config');

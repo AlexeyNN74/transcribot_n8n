@@ -1,4 +1,7 @@
 'use strict';
+// Version: 1.9.8
+// Updated: 2026-04-11
+
 const jwt = require('jsonwebtoken');
 const { JWT_SECRET } = require('./config');
 
