@@ -1,0 +1,1636 @@
+{
+  "updatedAt": "2026-04-11T18:45:37.947Z",
+  "createdAt": "2026-04-05T21:23:13.954Z",
+  "id": "ho6fwPPZOip7eXof",
+  "name": "Секретарь таймкодов v3",
+  "description": null,
+  "active": true,
+  "isArchived": false,
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 1
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        15408,
+        4672
+      ],
+      "id": "c0db1616-96d0-4aef-9c58-3f7fcd95ae25",
+      "name": "Schedule Trigger"
+    },
+    {
+      "parameters": {
+        "jsCode": "const fs = require('fs');\nconst path = require('path');\n\n// Удаляем зависшие lock-файлы старше 2 часов\nconst OUT_DIR_LOCK = '/opt/transcribe/data/results';\nif (fs.existsSync(OUT_DIR_LOCK)) {\n  const twoHoursAgo = Date.now() - 2 * 60 * 60 * 1000;\n  fs.readdirSync(OUT_DIR_LOCK).filter(f => f.endsWith('.lock')).forEach(lf => {\n    const lp = path.join(OUT_DIR_LOCK, lf);\n    try { if (fs.statSync(lp).mtimeMs < twoHoursAgo) { fs.unlinkSync(lp); } } catch(e) {}\n  });\n}\n\nconst IN_DIR  = '/opt/transcribe/data/uploads';\nconst OUT_DIR = '/opt/transcribe/data/results';\nconst MEDIA_EXT = /\\.(mp4|mp3|wav|m4a|avi|mov|mkv|webm|ogg|flac)$/i;\nconst JWT = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6Im44bi1pbnRlcm5hbCIsImVtYWlsIjoiYWRtaW5AbWVsa2kudG9wIiwicm9sZSI6ImFkbWluIiwibmFtZSI6Im44biIsImlhdCI6MTc3NTY4ODgxMCwiZXhwIjoyMDkxMjY0ODEwfQ.lmspqxgfE_D4yeT0ibV-akHhA9e457izkIW0Iwv5eB0';\n\nif (!fs.existsSync(IN_DIR)) return [];\nif (!fs.existsSync(OUT_DIR)) fs.mkdirSync(OUT_DIR, { recursive: true });\n\nconst inFiles = fs.readdirSync(IN_DIR).filter(f => MEDIA_EXT.test(f));\n\nfor (const file of inFiles) {\n  const baseName = file.replace(/\\.[^/.]+$/, '');\n  const lockPath   = path.join(OUT_DIR, `${baseName}.lock`);\n  const resultPath = path.join(OUT_DIR, `${baseName}_result.txt`);\n\n  // 1) Проверяем статус job в БД — пропускаем done и processing\n  let jobData = null;\n  try {\n    const resp = await $http.get(\n      `https://transcribe.melki.top/api/admin/job-by-filename?filename=${encodeURIComponent(file)}`,\n      { headers: { Authorization: `Bearer ${JWT}` } }\n    );\n    jobData = resp;\n    if (resp.status === 'completed' || resp.status === 'processing') continue;\n  } catch(e) {\n    // 404 = job не найден в БД — новый файл, обрабатываем\n  }\n\n  // 2) Lock и result файлы — fallback\n  if (fs.existsSync(resultPath) || fs.existsSync(lockPath)) continue;\n  fs.writeFileSync(lockPath, new Date().toISOString());\n\n  const promptText = (jobData && jobData.prompt_text) || '';\n\n  return [{ json: {\n    localPath: path.join(IN_DIR, file),\n    fileName:  file,\n    baseName:  baseName,\n    lockPath:  lockPath,\n    resultPath: resultPath,\n    promptText: promptText\n  }}];\n}\n\nreturn [];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        15632,
+        4672
+      ],
+      "id": "73b9b4d5-2328-412c-b708-c9199311c2ad",
+      "name": "Scan Uploads"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "cond-has-file",
+              "leftValue": "={{ $json.fileName }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        15856,
+        4672
+      ],
+      "id": "f52aad6a-2797-4e83-a0e0-61a64276fb4e",
+      "name": "Has File?"
+    },
+    {
+      "parameters": {
+        "url": "=https://transcribe.melki.top/api/gpu/status",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6Im44bi1pbnRlcm5hbCIsImVtYWlsIjoiYWRtaW5AbWVsa2kudG9wIiwicm9sZSI6ImFkbWluIiwibmFtZSI6Im44biIsImlhdCI6MTc3NTY4ODgxMCwiZXhwIjoyMDkxMjY0ODEwfQ.lmspqxgfE_D4yeT0ibV-akHhA9e457izkIW0Iwv5eB0"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        16048,
+        4416
+      ],
+      "id": "fb0d6e9e-2d4e-45a0-93c8-bb2cbe6f1e61",
+      "name": "Check GPU Status"
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = $input.first().json;\nconst fileInfo = $('Has File?').first().json;\n\n// Diarize флаг из Get Job Info\nlet diarize = 0;\nlet min_speakers = null;\nlet max_speakers = null;\nlet noise_filter = null;\ntry {\n  const jobInfo = $('Get Job Info').first().json;\n  diarize = Number(jobInfo.diarize) || 0;\n  min_speakers = jobInfo.min_speakers || null;\n  max_speakers = jobInfo.max_speakers || null;\n  noise_filter = jobInfo.noise_filter || null;\n} catch(e) {}\n\n// Endpoint возвращает { ok, status } — status это строка типа 'ACTIVE'\nconst status = response?.status || response?.server?.status || 'UNKNOWN';\n\nreturn [{ json: {\n  ...fileInfo,\n  diarize,\n  min_speakers,\n  max_speakers,\n  noise_filter,\n  gpuStatus:      status,\n  needsUnshelve:  status === 'SHELVED_OFFLOADED',\n  isReady:        status === 'ACTIVE'\n}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        16288,
+        4560
+      ],
+      "id": "424ee49b-6e60-4934-b925-b4b7256b9040",
+      "name": "Parse GPU Status"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "cond-needs-unshelve",
+              "leftValue": "={{ $json.needsUnshelve }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equal"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        16512,
+        4560
+      ],
+      "id": "ec02dd4d-9e3e-4c83-8992-aa15b2351fb5",
+      "name": "Needs Unshelve?"
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = await $http.post('https://transcribe.melki.top/api/gpu/action', {\n  body: { action: 'unshelve' },\n  json: true\n});\n\nreturn [{ json: { ...$input.first().json, unshelved: true } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        16736,
+        4480
+      ],
+      "id": "4e001be7-4ab9-4d11-bb5d-b29a766d2b3a",
+      "name": "Unshelve GPU"
+    },
+    {
+      "parameters": {
+        "amount": 120
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        16960,
+        4480
+      ],
+      "id": "5264bca3-6770-416e-9106-e5c88fcb7b94",
+      "name": "Wait GPU Boot",
+      "webhookId": "18a37878-e842-4eed-9e6e-0afdd3435c64"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://195.209.214.7:8000/v1/audio/transcriptions",
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "parameterType": "formBinaryData",
+              "name": "file",
+              "inputDataFieldName": "data"
+            },
+            {
+              "name": "model",
+              "value": "deepdml/faster-whisper-large-v3-turbo-ct2"
+            },
+            {
+              "name": "response_format",
+              "value": "verbose_json"
+            },
+            {
+              "name": "language",
+              "value": "ru"
+            },
+            {
+              "name": "prompt",
+              "value": "Это лекция или интервью на русском языке. Могут встречаться английские термины, названия компаний и иностранные слова."
+            },
+            {
+              "name": "word_timestamps",
+              "value": "false"
+            },
+            {
+              "name": "vad_filter",
+              "value": "true"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 7200000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        17616,
+        4720
+      ],
+      "id": "d12d9005-323d-42ac-ae07-645517a5d28d",
+      "name": "Send to Whisper"
+    },
+    {
+      "parameters": {
+        "fileSelector": "={{ $('Has File?').first().json.localPath }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1.1,
+      "position": [
+        17168,
+        4576
+      ],
+      "id": "64e75e9f-452e-49d6-b464-12a8bb101fc8",
+      "name": "Read File"
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.all()[0];\nconst segments = item.json.segments || [];\nconst fileInfo = $('Has File?').first().json;\n\nfunction formatTime(sec) {\n  const h = Math.floor(sec / 3600);\n  const m = Math.floor((sec % 3600) / 60).toString().padStart(2, '0');\n  const s = Math.floor(sec % 60).toString().padStart(2, '0');\n  if (h > 0) return `${h}:${m}:${s}`;\n  return `${m}:${s}`;\n}\n\nfunction formatTimeSRT(sec) {\n  const h = Math.floor(sec / 3600).toString().padStart(2, '0');\n  const m = Math.floor((sec % 3600) / 60).toString().padStart(2, '0');\n  const s = Math.floor(sec % 60).toString().padStart(2, '0');\n  const ms = Math.round((sec % 1) * 1000).toString().padStart(3, '0');\n  return `${h}:${m}:${s},${ms}`;\n}\n\nconst JUNK_PHRASES = [\n  'thank you for watching', 'thanks for watching',\n  'спасибо за просмотр', 'подпишитесь на канал',\n  'не забудьте поставить лайк', 'subscribe', 'amara.org', 'субтитры сделаны'\n];\n\nlet cleanText = '';\nlet srtText = '';\nlet srtIndex = 1;\nlet prevText = '';\nconst cleanSegments = [];\n\nfor (const seg of segments) {\n  const text = seg.text.trim();\n  if (text.length < 3) continue;\n  if (text === prevText) continue;\n  prevText = text;\n  const lower = text.toLowerCase();\n  if (JUNK_PHRASES.some(p => lower.includes(p))) continue;\n  if (seg.no_speech_prob > 0.8) continue;\n\n  cleanText += `[${formatTime(seg.start)} - ${formatTime(seg.end)}] ${text}\\n`;\n\n  srtText += `${srtIndex}\\n${formatTimeSRT(seg.start)} --> ${formatTimeSRT(seg.end)}\\n${text}\\n\\n`;\n  srtIndex++;\n\n  cleanSegments.push({ start: seg.start, end: seg.end, text });\n}\n\nconst MAX_CHARS = 30000;\nlet finalText = cleanText;\nif (cleanText.length > MAX_CHARS) {\n  finalText = cleanText.substring(0, MAX_CHARS);\n  const lastNewline = finalText.lastIndexOf('\\n');\n  if (lastNewline > 0) finalText = finalText.substring(0, lastNewline);\n  finalText += '\\n[...транскрипт обрезан...]';\n}\n\nreturn [{\n  json: {\n    chunk_data:     finalText,\n    file_name:      fileInfo.baseName,\n    result_path:    fileInfo.resultPath,\n    lock_path:      fileInfo.lockPath,\n    segments_count: segments.length,\n    result_srt:     srtText,\n    result_json:    JSON.stringify(cleanSegments),\n    promptText:     fileInfo.promptText || ''   // пробрасываем дальше\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        17408,
+        4560
+      ],
+      "id": "a5e29b55-2603-4ad0-a55f-93e401a57ea3",
+      "name": "Clean & Format Transcript"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://195.209.214.7:11434/api/generate",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{\n  {\n    \"model\": \"qwen2:7b\",\n    \"stream\": false,\n    \"options\": {\"num_ctx\": 32768, \"temperature\": 0.3, \"num_predict\": 2048},\n    \"system\": $('Get Job Info').first().json.prompt_text,\n    \"prompt\": $json.chunk_data\n  }\n}}",
+        "options": {
+          "timeout": 3600000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        17840,
+        4560
+      ],
+      "id": "a2f869ef-bb97-4df1-a78c-438107698f5c",
+      "name": "Send to Ollama"
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.all()[0];\n// Support both paths: Whisper and Diarize\nlet cleanData;\ntry {\n  cleanData = $('Clean & Format Transcript').first().json;\n} catch(e) {\n  try { cleanData = $('Format Diarize Result').first().json; }\n  catch(e2) { cleanData = {}; }\n}\nconst response  = item.json.response || '(\\u043D\\u0435\\u0442 \\u043E\\u0442\\u0432\\u0435\\u0442\\u0430 \\u043E\\u0442 \\u043C\\u043E\\u0434\\u0435\\u043B\\u0438)';\nconst timestamp = new Date().toLocaleString('ru-RU', {timeZone: 'Europe/Moscow'});\nconst finalText = [\n  `\\u041E\\u0431\\u0440\\u0430\\u0431\\u043E\\u0442\\u0430\\u043D\\u043E: ${timestamp}`,\n  '',\n  '\\u2550'.repeat(60),\n  '',\n  response,\n  ''\n].join('\\n');\n\n// result_clean: для diarize берём готовый plain_text, иначе strip timestamps\nconst diarizePlain = cleanData.diarize_plain_text || '';\nlet resultClean;\nif (diarizePlain) {\n  resultClean = diarizePlain;\n} else {\n  const rawClean = cleanData.chunk_data || '';\n  resultClean = rawClean.replace(/^\\[\\d{1,2}:\\d{2}(?::\\d{2})? - \\d{1,2}:\\d{2}(?::\\d{2})?\\] /gm, '');\n}\n\nreturn [{ json: {\n  result_path:  cleanData.result_path,\n  lock_path:    cleanData.lock_path,\n  file_name:    cleanData.file_name,\n  content:      finalText,\n  result_srt:   cleanData.result_srt  || '',\n  result_json:  cleanData.result_json || '',\n  result_clean: resultClean\n}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        18064,
+        4560
+      ],
+      "id": "803b2774-654d-40e7-bf7d-d68270b8e564",
+      "name": "Format Result"
+    },
+    {
+      "parameters": {
+        "jsCode": "const fs = require('fs');\nconst item = $input.first().json;\n\n// Сохраняем результат\nfs.writeFileSync(item.result_path, item.content, 'utf8');\n\n// Удаляем lock файл\nif (fs.existsSync(item.lock_path)) {\n  fs.unlinkSync(item.lock_path);\n}\n\n// Проверяем есть ли ещё файлы в очереди\nconst IN_DIR = '/opt/transcribe/data/uploads';\nconst OUT_DIR = '/opt/transcribe/data/results';\nconst MEDIA_EXT = /\\.(mp4|mp3|wav|m4a|avi|mov|mkv|webm|ogg|flac)$/i;\n\nconst inFiles = fs.readdirSync(IN_DIR).filter(f => MEDIA_EXT.test(f));\nlet hasMore = false;\n\nfor (const file of inFiles) {\n  const baseName = file.replace(/\\.[^/.]+$/, '');\n  const resultPath = `${OUT_DIR}/${baseName}_result.txt`;\n  const lockPath = `${OUT_DIR}/${baseName}.lock`;\n  if (!fs.existsSync(resultPath) && !fs.existsSync(lockPath)) {\n    hasMore = true;\n    break;\n  }\n}\n\nreturn [{ json: { \n  ...item,\n  saved: true,\n  queueEmpty: !hasMore\n}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        18288,
+        4560
+      ],
+      "id": "c9a1ab10-99be-4a3d-925e-cc4d5e035c1b",
+      "name": "Save Result"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "cond-queue-empty",
+              "leftValue": "={{ $json.queueEmpty }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equal"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        18704,
+        4560
+      ],
+      "id": "ba12159f-0f4c-47bd-b920-371a287453e5",
+      "name": "Queue Empty?"
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = await $http.post('https://transcribe.melki.top/api/gpu/action', {\n  body: { action: 'shelve' },\n  json: true\n});\n\nreturn [{ json: { shelved: true, message: 'GPU сервер на полке 💰' } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        18928,
+        4480
+      ],
+      "id": "d9e63bd7-66d4-455c-80a4-5086df88ea64",
+      "name": "Shelve GPU"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://transcribe.melki.top/api/internal/job-result",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6Im44bi1pbnRlcm5hbCIsImVtYWlsIjoiYWRtaW5AbWVsa2kudG9wIiwicm9sZSI6ImFkbWluIiwibmFtZSI6Im44biIsImlhdCI6MTc3NTY4ODgxMCwiZXhwIjoyMDkxMjY0ODEwfQ.lmspqxgfE_D4yeT0ibV-akHhA9e457izkIW0Iwv5eB0"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "filename",
+              "value": "={{ $('Scan Uploads').first().json.fileName }}"
+            },
+            {
+              "name": "result_txt",
+              "value": "={{ $('Format Result').first().json.content }}"
+            },
+            {
+              "name": "result_srt",
+              "value": "={{ $('Save Result').first().json.result_srt }}"
+            },
+            {
+              "name": "result_json",
+              "value": "={{ $('Save Result').first().json.result_json }}"
+            },
+            {
+              "name": "result_clean",
+              "value": "={{ $('Format Result').first().json.result_clean }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        18496,
+        4560
+      ],
+      "id": "0dc15426-f8c7-49c9-8e71-4470e834ac83",
+      "name": "Send Result to Site"
+    },
+    {
+      "parameters": {
+        "url": "https://transcribe.melki.top/api/admin/job-by-filename",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "filename",
+              "value": "={{ $json.fileName }}"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6Im44bi1pbnRlcm5hbCIsImVtYWlsIjoiYWRtaW5AbWVsa2kudG9wIiwicm9sZSI6ImFkbWluIiwibmFtZSI6Im44biIsImlhdCI6MTc3NTY4ODgxMCwiZXhwIjoyMDkxMjY0ODEwfQ.lmspqxgfE_D4yeT0ibV-akHhA9e457izkIW0Iwv5eB0"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "da123ae7-8675-41bb-8af0-1b3899778d88",
+      "name": "Get Job Info",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        16064,
+        4656
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://195.209.214.7:8002/diarize",
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "parameterType": "formBinaryData",
+              "name": "file",
+              "inputDataFieldName": "data"
+            },
+            {
+              "name": "min_speakers",
+              "value": "={{ $json.min_speakers || '' }}"
+            },
+            {
+              "name": "max_speakers",
+              "value": "={{ $json.max_speakers || '' }}"
+            },
+            {
+              "name": "noise_filter",
+              "value": "={{ $json.noise_filter || '' }}"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 7200000
+        }
+      },
+      "id": "09c896a7-f623-4fc9-a42a-a5077e7fc0d0",
+      "name": "Send to Diarize",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        17696,
+        4352
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\nconst fileInfo = $('Has File?').first().json;\nconst gpuInfo  = $('Parse GPU Status').first().json;\n\n// Безопасное извлечение сегментов (учитывает обёртки и разные форматы API)\nlet rawSegments = item.segments || [];\nif (!Array.isArray(rawSegments) && item.data) rawSegments = item.data.segments || [];\nif (!Array.isArray(rawSegments) && item.result) rawSegments = item.result.segments || [];\n\nfunction formatTime(sec) {\n  const h = Math.floor(sec / 3600);\n  const m = Math.floor((sec % 3600) / 60).toString().padStart(2, '0');\n  const s = Math.floor(sec % 60).toString().padStart(2, '0');\n  return h > 0 ? `${h}:${m}:${s}` : `${m}:${s}`;\n}\nfunction formatTimeSRT(sec) {\n  const h = Math.floor(sec / 3600).toString().padStart(2, '0');\n  const m = Math.floor((sec % 3600) / 60).toString().padStart(2, '0');\n  const s = Math.floor(sec % 60).toString().padStart(2, '0');\n  const ms = Math.round((sec % 1) * 1000).toString().padStart(3, '0');\n  return `${h}:${m}:${s},${ms}`;\n}\n\nlet chunkText = '', srtText = '';\nlet srtIndex = 1;\nconst cleanSegs = [];\n\nfor (const seg of rawSegments) {\n  const speaker = seg.speaker || `Голос ${seg.speaker_id || '?'}`;\n  const text = (seg.text || '').trim();\n  if (!text || text.length < 3) continue;\n  chunkText += `[${formatTime(seg.start)} - ${formatTime(seg.end)}] ${speaker}: ${text}\\n`;\n  srtText += `${srtIndex}\\n${formatTimeSRT(seg.start)} --> ${formatTimeSRT(seg.end)}\\n${speaker}: ${text}\\n\\n`;\n  srtIndex++;\n  cleanSegs.push({ start: seg.start, end: seg.end, speaker, text });\n}\n\n// Fallback: если сервер вернул plain_text вместо segments\nif (!chunkText && item.plain_text) chunkText = item.plain_text;\nif (!chunkText) chunkText = '(диаризация не вернула данных)';\n\nconst MAX_CHARS = 30000;\nlet finalText = chunkText;\nif (chunkText.length > MAX_CHARS) {\n  finalText = chunkText.substring(0, MAX_CHARS);\n  const lastNL = finalText.lastIndexOf('\\n');\n  if (lastNL > 0) finalText = finalText.substring(0, lastNL);\n  finalText += '\\n[...транскрипт обрезан...]';\n}\n\nreturn [{\n  json: {\n    chunk_data:     finalText,\n    file_name:      fileInfo.baseName || gpuInfo.baseName,\n    result_path:    fileInfo.resultPath || gpuInfo.resultPath,\n    lock_path:      fileInfo.lockPath || gpuInfo.lockPath,\n    total_chars:    chunkText.length,\n    segments_count: rawSegments.length,\n    result_srt:     srtText,\n    result_json:    JSON.stringify(cleanSegs),\n    promptText:     gpuInfo.promptText || '',\n    diarize_plain_text: item.plain_text || ''\n  }\n}];"
+      },
+      "id": "6e6662e1-c94f-45c6-b0ad-1e59eca3e282",
+      "name": "Format Diarize Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        17936,
+        4352
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Пробрасываем diarize флаг в JSON (после Read File JSON теряется)\nconst pgStatus = $('Parse GPU Status').first().json;\nconst diarize = Number(pgStatus.diarize) || 0;\nconst min_speakers = pgStatus.min_speakers || null;\nconst max_speakers = pgStatus.max_speakers || null;\nconst noise_filter = pgStatus.noise_filter || null;\nconst items = $input.all();\nreturn items.map(item => ({\n  json: { ...item.json, diarize_flag: diarize, min_speakers, max_speakers, noise_filter },\n  binary: item.binary\n}));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        17152,
+        4192
+      ],
+      "id": "d9c6fcbb-42a6-4895-9ebd-e967bb671573",
+      "name": "Restore Diarize Flag"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "cond-diarize",
+              "leftValue": "={{ $json.diarize_flag }}",
+              "rightValue": 1,
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        17408,
+        4192
+      ],
+      "id": "diarize-if-node",
+      "name": "Diarize?"
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Scan Uploads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Scan Uploads": {
+      "main": [
+        [
+          {
+            "node": "Has File?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has File?": {
+      "main": [
+        [
+          {
+            "node": "Get Job Info",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse GPU Status": {
+      "main": [
+        [
+          {
+            "node": "Needs Unshelve?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs Unshelve?": {
+      "main": [
+        [
+          {
+            "node": "Unshelve GPU",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Read File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Unshelve GPU": {
+      "main": [
+        [
+          {
+            "node": "Wait GPU Boot",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait GPU Boot": {
+      "main": [
+        [
+          {
+            "node": "Read File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read File": {
+      "main": [
+        [
+          {
+            "node": "Restore Diarize Flag",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send to Whisper": {
+      "main": [
+        [
+          {
+            "node": "Clean & Format Transcript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clean & Format Transcript": {
+      "main": [
+        [
+          {
+            "node": "Send to Ollama",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send to Ollama": {
+      "main": [
+        [
+          {
+            "node": "Format Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Result": {
+      "main": [
+        [
+          {
+            "node": "Save Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Result": {
+      "main": [
+        [
+          {
+            "node": "Send Result to Site",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Queue Empty?": {
+      "main": [
+        [
+          {
+            "node": "Shelve GPU",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Scan Uploads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Result to Site": {
+      "main": [
+        [
+          {
+            "node": "Queue Empty?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Job Info": {
+      "main": [
+        [
+          {
+            "node": "Check GPU Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send to Diarize": {
+      "main": [
+        [
+          {
+            "node": "Format Diarize Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Diarize Result": {
+      "main": [
+        [
+          {
+            "node": "Send to Ollama",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check GPU Status": {
+      "main": [
+        [
+          {
+            "node": "Parse GPU Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Restore Diarize Flag": {
+      "main": [
+        [
+          {
+            "node": "Diarize?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Diarize?": {
+      "main": [
+        [
+          {
+            "node": "Send to Diarize",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send to Whisper",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false,
+    "errorWorkflow": "zOnO3fTBxyxoJ4LS"
+  },
+  "staticData": {
+    "node:Schedule Trigger": {
+      "recurrenceRules": []
+    },
+    "node:Schedule Trigger1": {
+      "recurrenceRules": []
+    }
+  },
+  "meta": null,
+  "pinData": {},
+  "versionId": "e6620f73-e152-4b68-9296-0da62e5915fb",
+  "activeVersionId": "e6620f73-e152-4b68-9296-0da62e5915fb",
+  "versionCounter": 459,
+  "triggerCount": 1,
+  "shared": [
+    {
+      "updatedAt": "2026-04-05T21:23:13.960Z",
+      "createdAt": "2026-04-05T21:23:13.960Z",
+      "role": "workflow:owner",
+      "workflowId": "ho6fwPPZOip7eXof",
+      "projectId": "ZYAWh2OxeYpLKA0d",
+      "project": {
+        "updatedAt": "2026-04-04T18:10:36.618Z",
+        "createdAt": "2026-04-04T18:04:35.057Z",
+        "id": "ZYAWh2OxeYpLKA0d",
+        "name": "Алексей Нечаев <alex_clone@inbox.ru>",
+        "type": "personal",
+        "icon": null,
+        "description": null,
+        "creatorId": "32ca5d1b-861e-4962-8d1d-59f86c523f77"
+      }
+    }
+  ],
+  "tags": [],
+  "activeVersion": {
+    "updatedAt": "2026-04-11T18:45:37.951Z",
+    "createdAt": "2026-04-11T18:45:37.951Z",
+    "versionId": "e6620f73-e152-4b68-9296-0da62e5915fb",
+    "workflowId": "ho6fwPPZOip7eXof",
+    "nodes": [
+      {
+        "parameters": {
+          "rule": {
+            "interval": [
+              {
+                "field": "minutes",
+                "minutesInterval": 1
+              }
+            ]
+          }
+        },
+        "type": "n8n-nodes-base.scheduleTrigger",
+        "typeVersion": 1.3,
+        "position": [
+          15408,
+          4672
+        ],
+        "id": "c0db1616-96d0-4aef-9c58-3f7fcd95ae25",
+        "name": "Schedule Trigger"
+      },
+      {
+        "parameters": {
+          "jsCode": "const fs = require('fs');\nconst path = require('path');\n\n// Удаляем зависшие lock-файлы старше 2 часов\nconst OUT_DIR_LOCK = '/opt/transcribe/data/results';\nif (fs.existsSync(OUT_DIR_LOCK)) {\n  const twoHoursAgo = Date.now() - 2 * 60 * 60 * 1000;\n  fs.readdirSync(OUT_DIR_LOCK).filter(f => f.endsWith('.lock')).forEach(lf => {\n    const lp = path.join(OUT_DIR_LOCK, lf);\n    try { if (fs.statSync(lp).mtimeMs < twoHoursAgo) { fs.unlinkSync(lp); } } catch(e) {}\n  });\n}\n\nconst IN_DIR  = '/opt/transcribe/data/uploads';\nconst OUT_DIR = '/opt/transcribe/data/results';\nconst MEDIA_EXT = /\\.(mp4|mp3|wav|m4a|avi|mov|mkv|webm|ogg|flac)$/i;\nconst JWT = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6Im44bi1pbnRlcm5hbCIsImVtYWlsIjoiYWRtaW5AbWVsa2kudG9wIiwicm9sZSI6ImFkbWluIiwibmFtZSI6Im44biIsImlhdCI6MTc3NTY4ODgxMCwiZXhwIjoyMDkxMjY0ODEwfQ.lmspqxgfE_D4yeT0ibV-akHhA9e457izkIW0Iwv5eB0';\n\nif (!fs.existsSync(IN_DIR)) return [];\nif (!fs.existsSync(OUT_DIR)) fs.mkdirSync(OUT_DIR, { recursive: true });\n\nconst inFiles = fs.readdirSync(IN_DIR).filter(f => MEDIA_EXT.test(f));\n\nfor (const file of inFiles) {\n  const baseName = file.replace(/\\.[^/.]+$/, '');\n  const lockPath   = path.join(OUT_DIR, `${baseName}.lock`);\n  const resultPath = path.join(OUT_DIR, `${baseName}_result.txt`);\n\n  // 1) Проверяем статус job в БД — пропускаем done и processing\n  let jobData = null;\n  try {\n    const resp = await $http.get(\n      `https://transcribe.melki.top/api/admin/job-by-filename?filename=${encodeURIComponent(file)}`,\n      { headers: { Authorization: `Bearer ${JWT}` } }\n    );\n    jobData = resp;\n    if (resp.status === 'completed' || resp.status === 'processing') continue;\n  } catch(e) {\n    // 404 = job не найден в БД — новый файл, обрабатываем\n  }\n\n  // 2) Lock и result файлы — fallback\n  if (fs.existsSync(resultPath) || fs.existsSync(lockPath)) continue;\n  fs.writeFileSync(lockPath, new Date().toISOString());\n\n  const promptText = (jobData && jobData.prompt_text) || '';\n\n  return [{ json: {\n    localPath: path.join(IN_DIR, file),\n    fileName:  file,\n    baseName:  baseName,\n    lockPath:  lockPath,\n    resultPath: resultPath,\n    promptText: promptText\n  }}];\n}\n\nreturn [];"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          15632,
+          4672
+        ],
+        "id": "73b9b4d5-2328-412c-b708-c9199311c2ad",
+        "name": "Scan Uploads"
+      },
+      {
+        "parameters": {
+          "conditions": {
+            "options": {
+              "caseSensitive": true,
+              "leftValue": "",
+              "typeValidation": "strict",
+              "version": 3
+            },
+            "conditions": [
+              {
+                "id": "cond-has-file",
+                "leftValue": "={{ $json.fileName }}",
+                "rightValue": "",
+                "operator": {
+                  "type": "string",
+                  "operation": "notEmpty",
+                  "singleValue": true
+                }
+              }
+            ],
+            "combinator": "and"
+          },
+          "options": {}
+        },
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2.3,
+        "position": [
+          15856,
+          4672
+        ],
+        "id": "f52aad6a-2797-4e83-a0e0-61a64276fb4e",
+        "name": "Has File?"
+      },
+      {
+        "parameters": {
+          "url": "=https://transcribe.melki.top/api/gpu/status",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Authorization",
+                "value": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6Im44bi1pbnRlcm5hbCIsImVtYWlsIjoiYWRtaW5AbWVsa2kudG9wIiwicm9sZSI6ImFkbWluIiwibmFtZSI6Im44biIsImlhdCI6MTc3NTY4ODgxMCwiZXhwIjoyMDkxMjY0ODEwfQ.lmspqxgfE_D4yeT0ibV-akHhA9e457izkIW0Iwv5eB0"
+              }
+            ]
+          },
+          "options": {
+            "timeout": 30000
+          }
+        },
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.4,
+        "position": [
+          16048,
+          4416
+        ],
+        "id": "fb0d6e9e-2d4e-45a0-93c8-bb2cbe6f1e61",
+        "name": "Check GPU Status"
+      },
+      {
+        "parameters": {
+          "jsCode": "const response = $input.first().json;\nconst fileInfo = $('Has File?').first().json;\n\n// Diarize флаг из Get Job Info\nlet diarize = 0;\nlet min_speakers = null;\nlet max_speakers = null;\nlet noise_filter = null;\ntry {\n  const jobInfo = $('Get Job Info').first().json;\n  diarize = Number(jobInfo.diarize) || 0;\n  min_speakers = jobInfo.min_speakers || null;\n  max_speakers = jobInfo.max_speakers || null;\n  noise_filter = jobInfo.noise_filter || null;\n} catch(e) {}\n\n// Endpoint возвращает { ok, status } — status это строка типа 'ACTIVE'\nconst status = response?.status || response?.server?.status || 'UNKNOWN';\n\nreturn [{ json: {\n  ...fileInfo,\n  diarize,\n  min_speakers,\n  max_speakers,\n  noise_filter,\n  gpuStatus:      status,\n  needsUnshelve:  status === 'SHELVED_OFFLOADED',\n  isReady:        status === 'ACTIVE'\n}}];"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          16288,
+          4560
+        ],
+        "id": "424ee49b-6e60-4934-b925-b4b7256b9040",
+        "name": "Parse GPU Status"
+      },
+      {
+        "parameters": {
+          "conditions": {
+            "options": {
+              "caseSensitive": true,
+              "leftValue": "",
+              "typeValidation": "strict",
+              "version": 3
+            },
+            "conditions": [
+              {
+                "id": "cond-needs-unshelve",
+                "leftValue": "={{ $json.needsUnshelve }}",
+                "rightValue": true,
+                "operator": {
+                  "type": "boolean",
+                  "operation": "equal"
+                }
+              }
+            ],
+            "combinator": "and"
+          },
+          "options": {}
+        },
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2.3,
+        "position": [
+          16512,
+          4560
+        ],
+        "id": "ec02dd4d-9e3e-4c83-8992-aa15b2351fb5",
+        "name": "Needs Unshelve?"
+      },
+      {
+        "parameters": {
+          "jsCode": "const response = await $http.post('https://transcribe.melki.top/api/gpu/action', {\n  body: { action: 'unshelve' },\n  json: true\n});\n\nreturn [{ json: { ...$input.first().json, unshelved: true } }];"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          16736,
+          4480
+        ],
+        "id": "4e001be7-4ab9-4d11-bb5d-b29a766d2b3a",
+        "name": "Unshelve GPU"
+      },
+      {
+        "parameters": {
+          "amount": 120
+        },
+        "type": "n8n-nodes-base.wait",
+        "typeVersion": 1.1,
+        "position": [
+          16960,
+          4480
+        ],
+        "id": "5264bca3-6770-416e-9106-e5c88fcb7b94",
+        "name": "Wait GPU Boot",
+        "webhookId": "18a37878-e842-4eed-9e6e-0afdd3435c64"
+      },
+      {
+        "parameters": {
+          "method": "POST",
+          "url": "http://195.209.214.7:8000/v1/audio/transcriptions",
+          "sendBody": true,
+          "contentType": "multipart-form-data",
+          "bodyParameters": {
+            "parameters": [
+              {
+                "parameterType": "formBinaryData",
+                "name": "file",
+                "inputDataFieldName": "data"
+              },
+              {
+                "name": "model",
+                "value": "deepdml/faster-whisper-large-v3-turbo-ct2"
+              },
+              {
+                "name": "response_format",
+                "value": "verbose_json"
+              },
+              {
+                "name": "language",
+                "value": "ru"
+              },
+              {
+                "name": "prompt",
+                "value": "Это лекция или интервью на русском языке. Могут встречаться английские термины, названия компаний и иностранные слова."
+              },
+              {
+                "name": "word_timestamps",
+                "value": "false"
+              },
+              {
+                "name": "vad_filter",
+                "value": "true"
+              }
+            ]
+          },
+          "options": {
+            "timeout": 7200000
+          }
+        },
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.4,
+        "position": [
+          17616,
+          4720
+        ],
+        "id": "d12d9005-323d-42ac-ae07-645517a5d28d",
+        "name": "Send to Whisper"
+      },
+      {
+        "parameters": {
+          "fileSelector": "={{ $('Has File?').first().json.localPath }}",
+          "options": {}
+        },
+        "type": "n8n-nodes-base.readWriteFile",
+        "typeVersion": 1.1,
+        "position": [
+          17168,
+          4576
+        ],
+        "id": "64e75e9f-452e-49d6-b464-12a8bb101fc8",
+        "name": "Read File"
+      },
+      {
+        "parameters": {
+          "jsCode": "const item = $input.all()[0];\nconst segments = item.json.segments || [];\nconst fileInfo = $('Has File?').first().json;\n\nfunction formatTime(sec) {\n  const h = Math.floor(sec / 3600);\n  const m = Math.floor((sec % 3600) / 60).toString().padStart(2, '0');\n  const s = Math.floor(sec % 60).toString().padStart(2, '0');\n  if (h > 0) return `${h}:${m}:${s}`;\n  return `${m}:${s}`;\n}\n\nfunction formatTimeSRT(sec) {\n  const h = Math.floor(sec / 3600).toString().padStart(2, '0');\n  const m = Math.floor((sec % 3600) / 60).toString().padStart(2, '0');\n  const s = Math.floor(sec % 60).toString().padStart(2, '0');\n  const ms = Math.round((sec % 1) * 1000).toString().padStart(3, '0');\n  return `${h}:${m}:${s},${ms}`;\n}\n\nconst JUNK_PHRASES = [\n  'thank you for watching', 'thanks for watching',\n  'спасибо за просмотр', 'подпишитесь на канал',\n  'не забудьте поставить лайк', 'subscribe', 'amara.org', 'субтитры сделаны'\n];\n\nlet cleanText = '';\nlet srtText = '';\nlet srtIndex = 1;\nlet prevText = '';\nconst cleanSegments = [];\n\nfor (const seg of segments) {\n  const text = seg.text.trim();\n  if (text.length < 3) continue;\n  if (text === prevText) continue;\n  prevText = text;\n  const lower = text.toLowerCase();\n  if (JUNK_PHRASES.some(p => lower.includes(p))) continue;\n  if (seg.no_speech_prob > 0.8) continue;\n\n  cleanText += `[${formatTime(seg.start)} - ${formatTime(seg.end)}] ${text}\\n`;\n\n  srtText += `${srtIndex}\\n${formatTimeSRT(seg.start)} --> ${formatTimeSRT(seg.end)}\\n${text}\\n\\n`;\n  srtIndex++;\n\n  cleanSegments.push({ start: seg.start, end: seg.end, text });\n}\n\nconst MAX_CHARS = 30000;\nlet finalText = cleanText;\nif (cleanText.length > MAX_CHARS) {\n  finalText = cleanText.substring(0, MAX_CHARS);\n  const lastNewline = finalText.lastIndexOf('\\n');\n  if (lastNewline > 0) finalText = finalText.substring(0, lastNewline);\n  finalText += '\\n[...транскрипт обрезан...]';\n}\n\nreturn [{\n  json: {\n    chunk_data:     finalText,\n    file_name:      fileInfo.baseName,\n    result_path:    fileInfo.resultPath,\n    lock_path:      fileInfo.lockPath,\n    segments_count: segments.length,\n    result_srt:     srtText,\n    result_json:    JSON.stringify(cleanSegments),\n    promptText:     fileInfo.promptText || ''   // пробрасываем дальше\n  }\n}];"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          17408,
+          4560
+        ],
+        "id": "a5e29b55-2603-4ad0-a55f-93e401a57ea3",
+        "name": "Clean & Format Transcript"
+      },
+      {
+        "parameters": {
+          "method": "POST",
+          "url": "http://195.209.214.7:11434/api/generate",
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{\n  {\n    \"model\": \"qwen2:7b\",\n    \"stream\": false,\n    \"options\": {\"num_ctx\": 32768, \"temperature\": 0.3, \"num_predict\": 2048},\n    \"system\": $('Get Job Info').first().json.prompt_text,\n    \"prompt\": $json.chunk_data\n  }\n}}",
+          "options": {
+            "timeout": 3600000
+          }
+        },
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.4,
+        "position": [
+          17840,
+          4560
+        ],
+        "id": "a2f869ef-bb97-4df1-a78c-438107698f5c",
+        "name": "Send to Ollama"
+      },
+      {
+        "parameters": {
+          "jsCode": "const item = $input.all()[0];\n// Support both paths: Whisper and Diarize\nlet cleanData;\ntry {\n  cleanData = $('Clean & Format Transcript').first().json;\n} catch(e) {\n  try { cleanData = $('Format Diarize Result').first().json; }\n  catch(e2) { cleanData = {}; }\n}\nconst response  = item.json.response || '(\\u043D\\u0435\\u0442 \\u043E\\u0442\\u0432\\u0435\\u0442\\u0430 \\u043E\\u0442 \\u043C\\u043E\\u0434\\u0435\\u043B\\u0438)';\nconst timestamp = new Date().toLocaleString('ru-RU', {timeZone: 'Europe/Moscow'});\nconst finalText = [\n  `\\u041E\\u0431\\u0440\\u0430\\u0431\\u043E\\u0442\\u0430\\u043D\\u043E: ${timestamp}`,\n  '',\n  '\\u2550'.repeat(60),\n  '',\n  response,\n  ''\n].join('\\n');\n\n// result_clean: для diarize берём готовый plain_text, иначе strip timestamps\nconst diarizePlain = cleanData.diarize_plain_text || '';\nlet resultClean;\nif (diarizePlain) {\n  resultClean = diarizePlain;\n} else {\n  const rawClean = cleanData.chunk_data || '';\n  resultClean = rawClean.replace(/^\\[\\d{1,2}:\\d{2}(?::\\d{2})? - \\d{1,2}:\\d{2}(?::\\d{2})?\\] /gm, '');\n}\n\nreturn [{ json: {\n  result_path:  cleanData.result_path,\n  lock_path:    cleanData.lock_path,\n  file_name:    cleanData.file_name,\n  content:      finalText,\n  result_srt:   cleanData.result_srt  || '',\n  result_json:  cleanData.result_json || '',\n  result_clean: resultClean\n}}];"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          18064,
+          4560
+        ],
+        "id": "803b2774-654d-40e7-bf7d-d68270b8e564",
+        "name": "Format Result"
+      },
+      {
+        "parameters": {
+          "jsCode": "const fs = require('fs');\nconst item = $input.first().json;\n\n// Сохраняем результат\nfs.writeFileSync(item.result_path, item.content, 'utf8');\n\n// Удаляем lock файл\nif (fs.existsSync(item.lock_path)) {\n  fs.unlinkSync(item.lock_path);\n}\n\n// Проверяем есть ли ещё файлы в очереди\nconst IN_DIR = '/opt/transcribe/data/uploads';\nconst OUT_DIR = '/opt/transcribe/data/results';\nconst MEDIA_EXT = /\\.(mp4|mp3|wav|m4a|avi|mov|mkv|webm|ogg|flac)$/i;\n\nconst inFiles = fs.readdirSync(IN_DIR).filter(f => MEDIA_EXT.test(f));\nlet hasMore = false;\n\nfor (const file of inFiles) {\n  const baseName = file.replace(/\\.[^/.]+$/, '');\n  const resultPath = `${OUT_DIR}/${baseName}_result.txt`;\n  const lockPath = `${OUT_DIR}/${baseName}.lock`;\n  if (!fs.existsSync(resultPath) && !fs.existsSync(lockPath)) {\n    hasMore = true;\n    break;\n  }\n}\n\nreturn [{ json: { \n  ...item,\n  saved: true,\n  queueEmpty: !hasMore\n}}];"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          18288,
+          4560
+        ],
+        "id": "c9a1ab10-99be-4a3d-925e-cc4d5e035c1b",
+        "name": "Save Result"
+      },
+      {
+        "parameters": {
+          "conditions": {
+            "options": {
+              "caseSensitive": true,
+              "leftValue": "",
+              "typeValidation": "strict",
+              "version": 3
+            },
+            "conditions": [
+              {
+                "id": "cond-queue-empty",
+                "leftValue": "={{ $json.queueEmpty }}",
+                "rightValue": true,
+                "operator": {
+                  "type": "boolean",
+                  "operation": "equal"
+                }
+              }
+            ],
+            "combinator": "and"
+          },
+          "options": {}
+        },
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2.3,
+        "position": [
+          18704,
+          4560
+        ],
+        "id": "ba12159f-0f4c-47bd-b920-371a287453e5",
+        "name": "Queue Empty?"
+      },
+      {
+        "parameters": {
+          "jsCode": "const response = await $http.post('https://transcribe.melki.top/api/gpu/action', {\n  body: { action: 'shelve' },\n  json: true\n});\n\nreturn [{ json: { shelved: true, message: 'GPU сервер на полке 💰' } }];"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          18928,
+          4480
+        ],
+        "id": "d9e63bd7-66d4-455c-80a4-5086df88ea64",
+        "name": "Shelve GPU"
+      },
+      {
+        "parameters": {
+          "method": "POST",
+          "url": "https://transcribe.melki.top/api/internal/job-result",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Authorization",
+                "value": "=Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6Im44bi1pbnRlcm5hbCIsImVtYWlsIjoiYWRtaW5AbWVsa2kudG9wIiwicm9sZSI6ImFkbWluIiwibmFtZSI6Im44biIsImlhdCI6MTc3NTY4ODgxMCwiZXhwIjoyMDkxMjY0ODEwfQ.lmspqxgfE_D4yeT0ibV-akHhA9e457izkIW0Iwv5eB0"
+              }
+            ]
+          },
+          "sendBody": true,
+          "bodyParameters": {
+            "parameters": [
+              {
+                "name": "filename",
+                "value": "={{ $('Scan Uploads').first().json.fileName }}"
+              },
+              {
+                "name": "result_txt",
+                "value": "={{ $('Format Result').first().json.content }}"
+              },
+              {
+                "name": "result_srt",
+                "value": "={{ $('Save Result').first().json.result_srt }}"
+              },
+              {
+                "name": "result_json",
+                "value": "={{ $('Save Result').first().json.result_json }}"
+              },
+              {
+                "name": "result_clean",
+                "value": "={{ $('Format Result').first().json.result_clean }}"
+              }
+            ]
+          },
+          "options": {}
+        },
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.4,
+        "position": [
+          18496,
+          4560
+        ],
+        "id": "0dc15426-f8c7-49c9-8e71-4470e834ac83",
+        "name": "Send Result to Site"
+      },
+      {
+        "parameters": {
+          "url": "https://transcribe.melki.top/api/admin/job-by-filename",
+          "sendQuery": true,
+          "queryParameters": {
+            "parameters": [
+              {
+                "name": "filename",
+                "value": "={{ $json.fileName }}"
+              }
+            ]
+          },
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Authorization",
+                "value": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6Im44bi1pbnRlcm5hbCIsImVtYWlsIjoiYWRtaW5AbWVsa2kudG9wIiwicm9sZSI6ImFkbWluIiwibmFtZSI6Im44biIsImlhdCI6MTc3NTY4ODgxMCwiZXhwIjoyMDkxMjY0ODEwfQ.lmspqxgfE_D4yeT0ibV-akHhA9e457izkIW0Iwv5eB0"
+              }
+            ]
+          },
+          "options": {
+            "timeout": 10000
+          }
+        },
+        "id": "da123ae7-8675-41bb-8af0-1b3899778d88",
+        "name": "Get Job Info",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.4,
+        "position": [
+          16064,
+          4656
+        ]
+      },
+      {
+        "parameters": {
+          "method": "POST",
+          "url": "http://195.209.214.7:8002/diarize",
+          "sendBody": true,
+          "contentType": "multipart-form-data",
+          "bodyParameters": {
+            "parameters": [
+              {
+                "parameterType": "formBinaryData",
+                "name": "file",
+                "inputDataFieldName": "data"
+              },
+              {
+                "name": "min_speakers",
+                "value": "={{ $json.min_speakers || '' }}"
+              },
+              {
+                "name": "max_speakers",
+                "value": "={{ $json.max_speakers || '' }}"
+              },
+              {
+                "name": "noise_filter",
+                "value": "={{ $json.noise_filter || '' }}"
+              }
+            ]
+          },
+          "options": {
+            "response": {
+              "response": {
+                "responseFormat": "json"
+              }
+            },
+            "timeout": 7200000
+          }
+        },
+        "id": "09c896a7-f623-4fc9-a42a-a5077e7fc0d0",
+        "name": "Send to Diarize",
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.4,
+        "position": [
+          17696,
+          4352
+        ]
+      },
+      {
+        "parameters": {
+          "jsCode": "const item = $input.first().json;\nconst fileInfo = $('Has File?').first().json;\nconst gpuInfo  = $('Parse GPU Status').first().json;\n\n// Безопасное извлечение сегментов (учитывает обёртки и разные форматы API)\nlet rawSegments = item.segments || [];\nif (!Array.isArray(rawSegments) && item.data) rawSegments = item.data.segments || [];\nif (!Array.isArray(rawSegments) && item.result) rawSegments = item.result.segments || [];\n\nfunction formatTime(sec) {\n  const h = Math.floor(sec / 3600);\n  const m = Math.floor((sec % 3600) / 60).toString().padStart(2, '0');\n  const s = Math.floor(sec % 60).toString().padStart(2, '0');\n  return h > 0 ? `${h}:${m}:${s}` : `${m}:${s}`;\n}\nfunction formatTimeSRT(sec) {\n  const h = Math.floor(sec / 3600).toString().padStart(2, '0');\n  const m = Math.floor((sec % 3600) / 60).toString().padStart(2, '0');\n  const s = Math.floor(sec % 60).toString().padStart(2, '0');\n  const ms = Math.round((sec % 1) * 1000).toString().padStart(3, '0');\n  return `${h}:${m}:${s},${ms}`;\n}\n\nlet chunkText = '', srtText = '';\nlet srtIndex = 1;\nconst cleanSegs = [];\n\nfor (const seg of rawSegments) {\n  const speaker = seg.speaker || `Голос ${seg.speaker_id || '?'}`;\n  const text = (seg.text || '').trim();\n  if (!text || text.length < 3) continue;\n  chunkText += `[${formatTime(seg.start)} - ${formatTime(seg.end)}] ${speaker}: ${text}\\n`;\n  srtText += `${srtIndex}\\n${formatTimeSRT(seg.start)} --> ${formatTimeSRT(seg.end)}\\n${speaker}: ${text}\\n\\n`;\n  srtIndex++;\n  cleanSegs.push({ start: seg.start, end: seg.end, speaker, text });\n}\n\n// Fallback: если сервер вернул plain_text вместо segments\nif (!chunkText && item.plain_text) chunkText = item.plain_text;\nif (!chunkText) chunkText = '(диаризация не вернула данных)';\n\nconst MAX_CHARS = 30000;\nlet finalText = chunkText;\nif (chunkText.length > MAX_CHARS) {\n  finalText = chunkText.substring(0, MAX_CHARS);\n  const lastNL = finalText.lastIndexOf('\\n');\n  if (lastNL > 0) finalText = finalText.substring(0, lastNL);\n  finalText += '\\n[...транскрипт обрезан...]';\n}\n\nreturn [{\n  json: {\n    chunk_data:     finalText,\n    file_name:      fileInfo.baseName || gpuInfo.baseName,\n    result_path:    fileInfo.resultPath || gpuInfo.resultPath,\n    lock_path:      fileInfo.lockPath || gpuInfo.lockPath,\n    total_chars:    chunkText.length,\n    segments_count: rawSegments.length,\n    result_srt:     srtText,\n    result_json:    JSON.stringify(cleanSegs),\n    promptText:     gpuInfo.promptText || '',\n    diarize_plain_text: item.plain_text || ''\n  }\n}];"
+        },
+        "id": "6e6662e1-c94f-45c6-b0ad-1e59eca3e282",
+        "name": "Format Diarize Result",
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          17936,
+          4352
+        ]
+      },
+      {
+        "parameters": {
+          "jsCode": "// Пробрасываем diarize флаг в JSON (после Read File JSON теряется)\nconst pgStatus = $('Parse GPU Status').first().json;\nconst diarize = Number(pgStatus.diarize) || 0;\nconst min_speakers = pgStatus.min_speakers || null;\nconst max_speakers = pgStatus.max_speakers || null;\nconst noise_filter = pgStatus.noise_filter || null;\nconst items = $input.all();\nreturn items.map(item => ({\n  json: { ...item.json, diarize_flag: diarize, min_speakers, max_speakers, noise_filter },\n  binary: item.binary\n}));"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          17152,
+          4192
+        ],
+        "id": "d9c6fcbb-42a6-4895-9ebd-e967bb671573",
+        "name": "Restore Diarize Flag"
+      },
+      {
+        "parameters": {
+          "conditions": {
+            "options": {
+              "caseSensitive": true,
+              "leftValue": "",
+              "typeValidation": "strict",
+              "version": 3
+            },
+            "conditions": [
+              {
+                "id": "cond-diarize",
+                "leftValue": "={{ $json.diarize_flag }}",
+                "rightValue": 1,
+                "operator": {
+                  "type": "number",
+                  "operation": "equals"
+                }
+              }
+            ],
+            "combinator": "and"
+          },
+          "options": {}
+        },
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2.3,
+        "position": [
+          17408,
+          4192
+        ],
+        "id": "diarize-if-node",
+        "name": "Diarize?"
+      }
+    ],
+    "connections": {
+      "Schedule Trigger": {
+        "main": [
+          [
+            {
+              "node": "Scan Uploads",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Scan Uploads": {
+        "main": [
+          [
+            {
+              "node": "Has File?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Has File?": {
+        "main": [
+          [
+            {
+              "node": "Get Job Info",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Parse GPU Status": {
+        "main": [
+          [
+            {
+              "node": "Needs Unshelve?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Needs Unshelve?": {
+        "main": [
+          [
+            {
+              "node": "Unshelve GPU",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Read File",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Unshelve GPU": {
+        "main": [
+          [
+            {
+              "node": "Wait GPU Boot",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Wait GPU Boot": {
+        "main": [
+          [
+            {
+              "node": "Read File",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Read File": {
+        "main": [
+          [
+            {
+              "node": "Restore Diarize Flag",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Send to Whisper": {
+        "main": [
+          [
+            {
+              "node": "Clean & Format Transcript",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Clean & Format Transcript": {
+        "main": [
+          [
+            {
+              "node": "Send to Ollama",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Send to Ollama": {
+        "main": [
+          [
+            {
+              "node": "Format Result",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Format Result": {
+        "main": [
+          [
+            {
+              "node": "Save Result",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Save Result": {
+        "main": [
+          [
+            {
+              "node": "Send Result to Site",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Queue Empty?": {
+        "main": [
+          [
+            {
+              "node": "Shelve GPU",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Scan Uploads",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Send Result to Site": {
+        "main": [
+          [
+            {
+              "node": "Queue Empty?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Get Job Info": {
+        "main": [
+          [
+            {
+              "node": "Check GPU Status",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Send to Diarize": {
+        "main": [
+          [
+            {
+              "node": "Format Diarize Result",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Format Diarize Result": {
+        "main": [
+          [
+            {
+              "node": "Send to Ollama",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Check GPU Status": {
+        "main": [
+          [
+            {
+              "node": "Parse GPU Status",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Restore Diarize Flag": {
+        "main": [
+          [
+            {
+              "node": "Diarize?",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Diarize?": {
+        "main": [
+          [
+            {
+              "node": "Send to Diarize",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Send to Whisper",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "authors": "Алексей Нечаев",
+    "name": null,
+    "description": null,
+    "autosaved": false,
+    "workflowPublishHistory": [
+      {
+        "createdAt": "2026-04-11T18:45:38.201Z",
+        "id": 209,
+        "workflowId": "ho6fwPPZOip7eXof",
+        "versionId": "e6620f73-e152-4b68-9296-0da62e5915fb",
+        "event": "activated",
+        "userId": "32ca5d1b-861e-4962-8d1d-59f86c523f77"
+      },
+      {
+        "createdAt": "2026-04-11T18:45:38.123Z",
+        "id": 208,
+        "workflowId": "ho6fwPPZOip7eXof",
+        "versionId": "e6620f73-e152-4b68-9296-0da62e5915fb",
+        "event": "deactivated",
+        "userId": "32ca5d1b-861e-4962-8d1d-59f86c523f77"
+      }
+    ]
+  }
+}

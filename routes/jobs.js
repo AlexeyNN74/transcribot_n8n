@@ -115,16 +115,22 @@ async function processJob(jobId, filename, filePath) {
 // ===== LIST / GET =====
 router.get('/', authMiddleware, (req, res) => {
   const jobs = db.prepare(`
-    SELECT id, original_name, status, progress, keep_days, created_at, completed_at, expires_at,
-    rating, prompt_id, diarize,
-    CASE WHEN result_txt IS NOT NULL THEN 1 ELSE 0 END as has_result
-    FROM jobs WHERE user_id = ? AND status != 'archived' ORDER BY created_at DESC
+    SELECT j.id, j.original_name, j.status, j.progress, j.keep_days, j.created_at, j.completed_at, j.expires_at,
+    j.rating, j.prompt_id, j.diarize, j.min_speakers, j.max_speakers, j.noise_filter,
+    CASE WHEN j.result_txt IS NOT NULL THEN 1 ELSE 0 END as has_result,
+    p.name as prompt_name
+    FROM jobs j LEFT JOIN prompts p ON j.prompt_id = p.id
+    WHERE j.user_id = ? AND j.status != 'archived' ORDER BY j.created_at DESC
   `).all(req.user.id);
   res.json(jobs);
 });
 
 router.get('/:id', authMiddleware, (req, res) => {
-  const job = db.prepare('SELECT * FROM jobs WHERE id = ? AND user_id = ?').get(req.params.id, req.user.id);
+  const job = db.prepare(`
+    SELECT j.*, p.name as prompt_name
+    FROM jobs j LEFT JOIN prompts p ON j.prompt_id = p.id
+    WHERE j.id = ? AND j.user_id = ?
+  `).get(req.params.id, req.user.id);
   if (!job) return res.status(404).json({ error: 'Задание не найдено' });
   res.json(job);
 });
@@ -268,7 +274,7 @@ router.get('/:id/download/docx-clean', authMiddleware, async (req, res) => {
     const baseName = path.basename(job.original_name, path.extname(job.original_name));
 
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
-    res.setHeader('Content-Disposition', `attachment; filename="${baseName}_clean.docx"`);
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(baseName + '_clean')}.docx`);
     res.send(buffer);
   } catch (e) {
     console.error('[DOCX-CLEAN]', e.message);

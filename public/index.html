@@ -888,8 +888,8 @@
               <select id="noiseFilter" style="margin-left:6px; padding:4px 8px; border-radius:6px; background:#2a2a3e; color:#eee; border:1px solid #444;">
                 <option value="">Авто (по SNR)</option>
                 <option value="none">Без фильтра</option>
-                <option value="light">Лёгкий (офис)</option>
-                <option value="aggressive">Агрессивный (кафе, улица)</option>
+                <option value="light">Вебинар Zoom</option>
+                <option value="aggressive">Кафе, улица</option>
               </select>
             </div></div>
             </div>
@@ -1613,7 +1613,7 @@ async function loadJobs() {
           <tbody>
             ${jobs.map(job => `
               <tr>
-                <td><div class="job-name" title="${job.original_name}">${job.diarize ? '<span title="Диаризация" style="margin-right:4px">👥</span>' : '<span title="Без диаризации" style="margin-right:4px;opacity:0.3">👤</span>'} ${job.original_name}</div></td>
+                <td><div class="job-name" title="${job.original_name}">${job.diarize ? '<span title="Диаризация" style="margin-right:4px">👥</span>' : '<span title="Без диаризации" style="margin-right:4px;opacity:0.3">👤</span>'} ${job.original_name}</div><div style="font-size:11px;color:var(--text2);margin-top:2px;display:flex;gap:8px;flex-wrap:wrap">${job.prompt_name ? '<span>📋 '+job.prompt_name+'</span>' : ''}${job.min_speakers || job.max_speakers ? '<span>🎤 '+(job.min_speakers||'?')+'–'+(job.max_speakers||'?')+' гол.</span>' : ''}${job.noise_filter && job.noise_filter !== 'none' ? '<span>🔇 '+({auto:'Авто SNR',light:'Zoom',aggressive:'Кафе/улица'}[job.noise_filter]||job.noise_filter)+'</span>' : ''}</div></td>
                 <td><span class="badge badge-${job.status}">${statusLabel(job.status)}</span></td>
                 <td><div class="job-date">${formatDate(job.created_at)}</div></td>
                 <td><div class="job-date">${job.expires_at ? formatDate(job.expires_at) : '—'}</div></td>
@@ -1874,6 +1874,21 @@ async function viewJob(id) {
     document.getElementById("btn-docx-clean").style.display = job.diarize ? "" : "none";
 
     document.getElementById('modal-job-name').textContent = job.original_name;
+    // Настройки обработки
+    const noiseLabels = {auto:'Авто SNR', light:'Лёгкий', aggressive:'Агрессивный'};
+    let metaParts = [];
+    if (job.prompt_name) metaParts.push('📋 ' + job.prompt_name);
+    if (job.min_speakers || job.max_speakers) metaParts.push('🎤 ' + (job.min_speakers||'?') + '–' + (job.max_speakers||'?') + ' гол.');
+    if (job.noise_filter && job.noise_filter !== 'none') metaParts.push('🔇 ' + (noiseLabels[job.noise_filter] || job.noise_filter));
+    let metaEl = document.getElementById('modal-job-meta');
+    if (!metaEl) {
+      metaEl = document.createElement('div');
+      metaEl.id = 'modal-job-meta';
+      metaEl.style.cssText = 'font-size:12px;color:var(--text2);margin:4px 0 8px;display:flex;gap:12px';
+      document.getElementById('modal-job-name').after(metaEl);
+    }
+    metaEl.innerHTML = metaParts.join('');
+    metaEl.style.display = metaParts.length ? 'flex' : 'none';
 
     // Саммари
     document.getElementById('modal-tab-summary').textContent = job.result_txt || '(нет данных)';
