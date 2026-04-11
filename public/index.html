@@ -861,7 +861,37 @@
               <div>
                 <label for="diarize-check" style="font-size:14px;font-weight:500;cursor:pointer;margin:0">Диаризация (разделение по голосам)</label>
                 <div style="font-size:12px;color:var(--text2);margin-top:2px">WhisperX определит кто говорит: Голос 1, Голос 2...</div>
-              </div>
+              
+            <div id="speakersGroup" style="display:none; margin-top:10px; padding:8px 12px; border-radius:8px; background:rgba(255,255,255,0.05);">
+              <span style="font-size:0.9em; color:#aab;">Спикеров мин:</span>
+              <select id="minSpeakers" style="margin-left:6px; padding:4px 8px; border-radius:6px; background:#2a2a3e; color:#eee; border:1px solid #444;">
+                <option value="">Авто</option>
+                <option value="1">1</option>
+                <option value="2">2</option>
+                <option value="3">3</option>
+                <option value="4">4</option>
+                <option value="5">5</option>
+              </select>
+              <span style="margin-left:12px; font-size:0.9em; color:#aab;">макс:</span>
+              <select id="maxSpeakers" style="margin-left:6px; padding:4px 8px; border-radius:6px; background:#2a2a3e; color:#eee; border:1px solid #444;">
+                <option value="">Авто</option>
+                <option value="2">2</option>
+                <option value="3">3</option>
+                <option value="4">4</option>
+                <option value="5">5</option>
+                <option value="6">6</option>
+                <option value="10">10</option>
+              </select>
+            </div>
+            <div id="noiseGroup" style="margin-top:8px; padding:8px 12px; border-radius:8px; background:rgba(255,255,255,0.05);">
+              <span style="font-size:0.9em; color:#aab;">Шумоподавление:</span>
+              <select id="noiseFilter" style="margin-left:6px; padding:4px 8px; border-radius:6px; background:#2a2a3e; color:#eee; border:1px solid #444;">
+                <option value="">Авто (по SNR)</option>
+                <option value="none">Без фильтра</option>
+                <option value="light">Лёгкий (офис)</option>
+                <option value="aggressive">Агрессивный (кафе, улица)</option>
+              </select>
+            </div></div>
             </div>
             <div id="upload-progress" class="progress-bar">
               <div class="progress-fill" id="upload-progress-fill"></div>
@@ -1493,6 +1523,12 @@ async function doUpload() {
       formData.append('file', file);
       formData.append('keep_days', keepDays);
       formData.append('diarize', diarize);
+      const minSp = document.getElementById('minSpeakers')?.value;
+      const maxSp = document.getElementById('maxSpeakers')?.value;
+      if (minSp) formData.append('min_speakers', minSp);
+      if (maxSp) formData.append('max_speakers', maxSp);
+      const nf = document.getElementById('noiseFilter')?.value;
+      if (nf) formData.append('noise_filter', nf);
       if (promptId) formData.append('prompt_id', promptId);
       try {
         await new Promise((resolve, reject) => {
@@ -2040,6 +2076,22 @@ async function archiveJournal() {
     loadJournal();
   } catch(e) { showNotify(e.message); }
 }
+
+
+
+(function() {
+  var dc = document.getElementById('diarize-check');
+  var sg = document.getElementById('speakersGroup');
+  if (dc && sg) {
+    sg.style.display = dc.checked ? 'block' : 'none';
+    var ng = document.getElementById('noiseGroup');
+    if (ng) ng.style.display = dc.checked ? 'block' : 'none';
+    dc.addEventListener('change', function() {
+      sg.style.display = dc.checked ? 'block' : 'none';
+      if (ng) ng.style.display = dc.checked ? 'block' : 'none';
+    });
+  }
+})();
 </script>
 <!-- Notification Modal -->
 <div id="notify-modal" onclick="if(event.target===this)closeNotify()">

@@ -223,7 +223,7 @@ router.get('/job-by-filename', adminMiddleware, (req, res) => {
   const { filename } = req.query;
   if (!filename) return res.status(400).json({ error: 'filename required' });
 
-  const job = db.prepare('SELECT id, filename, diarize, status, prompt_text FROM jobs WHERE filename = ?').get(filename);
+  const job = db.prepare('SELECT id, filename, diarize, status, prompt_text, min_speakers, max_speakers, noise_filter FROM jobs WHERE filename = ?').get(filename);
   if (!job) return res.status(404).json({ error: 'Job not found', filename });
 
   res.json(job);

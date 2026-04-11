@@ -58,6 +58,9 @@ router.post('/upload', authMiddleware, upload.single('file'), async (req, res) =
   const jobId = uuidv4();
   const expiresAt = new Date(Date.now() + keepDays * 24 * 60 * 60 * 1000).toISOString();
   const diarize = req.body.diarize === '1' ? 1 : 0;
+  const minSpeakers = req.body.min_speakers ? parseInt(req.body.min_speakers) : null;
+  const maxSpeakers = req.body.max_speakers ? parseInt(req.body.max_speakers) : null;
+  const noiseFilter = req.body.noise_filter || null;
 
   let promptId = req.body.prompt_id || null;
   let promptText = null;
@@ -84,9 +87,9 @@ router.post('/upload', authMiddleware, upload.single('file'), async (req, res) =
   }
 
   db.prepare(`
-    INSERT INTO jobs (id, user_id, filename, original_name, keep_days, expires_at, status, prompt_id, prompt_text, diarize)
-    VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)
-  `).run(jobId, req.user.id, req.file.filename, originalName, keepDays, expiresAt, promptId, promptText, diarize);
+    INSERT INTO jobs (id, user_id, filename, original_name, keep_days, expires_at, status, prompt_id, prompt_text, diarize, min_speakers, max_speakers, noise_filter)
+    VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)
+  `).run(jobId, req.user.id, req.file.filename, originalName, keepDays, expiresAt, promptId, promptText, diarize, minSpeakers || null, maxSpeakers || null, noiseFilter);
 
   processJob(jobId, req.file.filename, req.file.path).catch(console.error);
 
@@ -94,6 +97,7 @@ router.post('/upload', authMiddleware, upload.single('file'), async (req, res) =
     original_name: req.file.originalname,
     size_mb: Math.round(req.file.size / 1024 / 1024 * 10) / 10,
     diarize,
+    min_speakers: minSpeakers,
     prompt_id: promptId
   });
   res.json({ jobId, message: 'Файл загружен и поставлен в очередь' });
