@@ -1577,7 +1577,7 @@ async function loadJobs() {
           <tbody>
             ${jobs.map(job => `
               <tr>
-                <td><div class="job-name" title="${job.original_name}">${job.original_name}</div></td>
+                <td><div class="job-name" title="${job.original_name}">${job.diarize ? '<span title="Диаризация" style="margin-right:4px">👥</span>' : '<span title="Без диаризации" style="margin-right:4px;opacity:0.3">👤</span>'} ${job.original_name}</div></td>
                 <td><span class="badge badge-${job.status}">${statusLabel(job.status)}</span></td>
                 <td><div class="job-date">${formatDate(job.created_at)}</div></td>
                 <td><div class="job-date">${job.expires_at ? formatDate(job.expires_at) : '—'}</div></td>
@@ -1594,7 +1594,7 @@ async function loadJobs() {
                 </td>
                 <td style="display:flex;gap:6px">
                   ${job.has_result ? `<button class="btn btn-outline btn-sm" onclick="viewJob('${job.id}')">👁 Просмотр</button>` : ''}
-                  <button class="btn btn-danger btn-sm" onclick="deleteJob('${job.id}')">✕</button>
+                  ${job.status !== 'archived' ? '<button class="btn btn-danger btn-sm" onclick="deleteJob(\'' + job.id + '\')">✕</button>' : ''}
                 </td>
               </tr>
             `).join('')}
@@ -1897,7 +1897,7 @@ function formatDate(str) {
 }
 
 function statusLabel(s) {
-  const labels = { pending: 'Ожидает', queued: 'В очереди', processing: 'Обработка', completed: 'Готово', error: 'Ошибка' };
+  const labels = { pending: 'Ожидает', queued: 'В очереди', processing: 'Обработка', completed: 'Готово', error: 'Ошибка', archived: 'Архив' };
   return labels[s] || s;
 }
 
