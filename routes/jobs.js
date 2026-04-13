@@ -237,7 +237,7 @@ router.get('/:id/download/docx-clean', authMiddleware, async (req, res) => {
 
   const summary = job.result_txt ? job.result_txt.split('\n---\n')[0].trim() : '';
   let transcript = getTranscript(job);
-  transcript = transcript.replace(/^Голос \d+:\s*/gm, '').replace(/^SPEAKER_\d+:\s*/gm, '');
+  transcript = transcript.replace(/^Голос \d+:?\s*\n?/gm, '').replace(/^SPEAKER_\d+:?\s*\n?/gm, '');
 
   let content = '';
   if (summary) content += summary;

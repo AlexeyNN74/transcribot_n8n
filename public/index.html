@@ -1895,11 +1895,14 @@ async function viewJob(id) {
     // Саммари
     document.getElementById('modal-tab-summary').textContent = job.result_txt || '(нет данных)';
 
-    // Транскрипция — чистый текст без таймкодов
-    const clean = (job.result_srt || '')
-      .replace(/^\d+\n[\d:,]+ --> [\d:,]+\n/gm, '')
-      .replace(/\n{3,}/g, '\n\n').trim();
-    document.getElementById('modal-tab-transcript').textContent = clean || job.result_clean || '(нет данных)';
+    // Транскрипция — приоритет: result_clean (с пунктуацией), fallback: парсенный SRT
+    let transcriptText = job.result_clean || '';
+    if (!transcriptText) {
+      transcriptText = (job.result_srt || '')
+        .replace(/^\d+\n[\d:,]+ --> [\d:,]+\n/gm, '')
+        .replace(/\n{3,}/g, '\n\n').trim();
+    }
+    document.getElementById('modal-tab-transcript').textContent = transcriptText || '(нет данных)';
 
     // Звёздочки
     const stars = document.getElementById('modal-stars');
