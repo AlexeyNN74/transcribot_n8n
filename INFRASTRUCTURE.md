@@ -1,6 +1,6 @@
 # INFRASTRUCTURE.md — Студия Транскрибации
 
-**Обновлено:** 11 апреля 2026
+**Обновлено:** 15 апреля 2026
 
 ---
 
@@ -12,8 +12,49 @@
 | ОС | Ubuntu 22.04 | Ubuntu 22.04 |
 | Пользователь | `root` | `ubuntu` |
 | SSH | `ssh root@212.67.8.251` | `ssh ubuntu@195.209.214.7` |
-| GPU | — | NVIDIA RTX 3090 |
+| GPU | — | NVIDIA RTX 3090 (24 GB VRAM) |
 | Хостинг | Beget VPS | immers.cloud (OpenStack) |
+| SSH между серверами | `ssh ubuntu@195.209.214.7` (ключ `web-to-gpu`, ed25519) |
+
+---
+
+## Pipeline данных: аудио → результат
+
+```
+ПОЛЬЗОВАТЕЛЬ загружает файл
+    ↓
+🟢 Веб-сервер: /data/uploads/{uuid}.mp3
+    ↓  (n8n workflow или batch_diarize.py через SCP)
+🔴 GPU-сервер: diarize_server :8002
+    ↓
+  POST /diarize  file=<audio>
+    ↓
+  ffmpeg (CPU): MP3 → mono 16kHz WAV + loudnorm + SNR-анализ + noise filter
+    ↓
+  Whisper (GPU, :8000): WAV → segments [{start, end, text}, ...]
+    ↓
+  Pyannote (GPU): диаризация чанками по 20 мин → speaker labels
+    ↓
+  Merge + Group: объединение → [{start, end, speaker, text}, ...]
+    ↓
+ОТВЕТ JSON: {segments, plain_text, stats}
+    ↓
+🟢 Веб-сервер: конвертация (n8n/скрипт)
+    ↓
+  result_srt   = SRT с голосами: "1\n00:08:02,260 --> 00:09:28,150\nГолос 1: текст"
+  result_clean = текст с голосами без таймкодов
+  result_json  = JSON.stringify(полный ответ diarize)
+    ↓
+🟢 Саммари (ОТДЕЛЬНО от diarize):
+  Claude API (Haiku) с веб-сервера → result_txt
+  ИЛИ Ollama на GPU (qwen2.5:14b) → result_txt (устаревший путь)
+    ↓
+🟢 БД: POST /api/internal/job-result
+  {filename, result_txt, result_srt, result_json, result_clean}
+  Auth: Bearer <JWT>
+```
+
+**Табы в UI:** «Саммари» = result_txt (ВСЕГДА), «Транскрипция» = result_srt/result_clean (ВСЕГДА)
 
 ---
 
@@ -31,23 +72,16 @@
 | Volume (код) | `/opt/transcribe/app:/app` |
 | Volume (данные) | `/opt/transcribe/data:/data` |
 | Volume node_modules | `/app/node_modules` (анонимный) |
-| БД | `/data/db/transcribe.db` (SQLite, better-sqlite3) |
-| Загрузки | `/data/uploads/` |
-| Результаты | `/data/results/` |
+| БД | `/opt/transcribe/data/db/transcribe.db` (SQLite, better-sqlite3) |
+| Загрузки | `/opt/transcribe/data/uploads/` |
+| Результаты | `/opt/transcribe/data/results/` |
 | docker-compose | `/opt/transcribe/docker-compose.yml` |
 
 **Команды:**
 ```bash
-# Перезапуск после изменения файлов
 docker restart transcribe_app
-
-# Пересоздание после изменения env/docker-compose.yml
 cd /opt/transcribe && docker compose up -d --force-recreate app
-
-# Логи
 docker logs -f transcribe_app --tail 100
-
-# Проверка
 curl -s https://transcribe.melki.top/api/version
 ```
 
@@ -58,6 +92,7 @@ curl -s https://transcribe.melki.top/api/version
 | Контейнер | `n8n` |
 | Порт | `5678` |
 | URL | `http://212.67.8.251:5678` |
+| NODE_OPTIONS | `--max-old-space-size=4096` |
 | Медиа (входящие) | `/n8n_media/IN/` |
 | Медиа (исходящие) | `/n8n_media/OUT/` |
 
@@ -65,8 +100,10 @@ curl -s https://transcribe.melki.top/api/version
 - **Секретарь таймкодов v3** — ID: `ho6fwPPZOip7eXof` (основной pipeline)
 - **Error Handler** — ID: `zOnO3fTBxyxoJ4LS` (обработка ошибок)
 
-**Команды:**
+⚠️ **n8n OOM на файлах >88MB** — передаёт файлы через HTTP. Решение: SCP файлов на GPU (задача 2.4 в ROADMAP)
+
 ```bash
+docker start n8n
 docker logs -f n8n --tail 100
 docker restart n8n
 ```
@@ -81,6 +118,21 @@ docker restart n8n
 ```bash
 sudo systemctl reload caddy
 sudo systemctl status caddy
+```
+
+### Claude API (для саммари)
+
+| Параметр | Значение |
+|----------|----------|
+| Доступ | С веб-сервера Beget напрямую (HTTP 405 = ОК) |
+| Модель | `claude-haiku-4-5-20251001` |
+| Стоимость | ~$0.03/файл |
+| Rate limit | 50K input tokens/min → пауза 30 сек между файлами |
+| Скрипт | `/tmp/claude_summaries.py` |
+| API ключ | через env `ANTHROPIC_API_KEY` |
+
+```bash
+ANTHROPIC_API_KEY=sk-ant-... python3 /tmp/claude_summaries.py
 ```
 
 ---
@@ -102,7 +154,6 @@ sudo systemctl status caddy
 ```bash
 sudo docker compose -f /root/whisper/docker-compose.yml up -d
 sudo docker compose -f /root/whisper/docker-compose.yml logs -f --tail 50
-sudo docker ps | grep whisper
 curl -s http://localhost:8000/health
 ```
 
@@ -111,10 +162,13 @@ curl -s http://localhost:8000/health
 | Параметр | Значение |
 |----------|----------|
 | Тип | systemd service |
-| Скрипт | `/home/ubuntu/diarize_server.py` (v4) |
+| Скрипт | `/home/ubuntu/diarize_server.py` (**v5**) |
 | Порт | `:8002` |
 | Unit-файл | `/etc/systemd/system/diarize.service` |
-| Особенности | Чанки, ffmpeg, без лимита размера, однопоточный |
+| Чанки | 20 мин + 30 сек overlap |
+| VRAM | ~4 GB при работе |
+| Скорость | ~10x realtime (67 мин аудио → 6 мин) |
+| Особенности | SNR-анализ, noise_filter_override, min/max speakers, без лимита размера |
 
 ```bash
 sudo systemctl status diarize
@@ -129,12 +183,28 @@ curl -s http://localhost:8002/health
 |----------|----------|
 | Контейнер | `ollama_engine` |
 | Порт | `:11434` |
-| Модели | `qwen2:7b`, `llama3.1:8b`, `gemma2:9b`, `qwen2.5:14b` |
+| Модели | `qwen2:7b`, `qwen2.5:14b`, `qwen2.5vl:3b/7b`, `llama3.1:8b`, `gemma2:9b`, `deepseek-ocr`, `glm-ocr` |
 | Restart | `unless-stopped` |
+| Примечание | Используется также проектом pdfocr |
+
+⚠️ **Для саммари теперь используется Claude API** — Ollama для саммари не рекомендуется (qwen2.5:14b не следует формату)
 
 ```bash
 docker logs -f ollama_engine --tail 50
 curl -s http://localhost:11434/api/tags | jq '.models[].name'
+```
+
+### n8n_app (pdfocr)
+
+| Параметр | Значение |
+|----------|----------|
+| Контейнер | `n8n_app` |
+| Назначение | PDF OCR проект (отдельный от веб-сервера n8n!) |
+| Статус | По умолчанию остановлен |
+
+```bash
+docker start n8n_app   # запустить для pdfocr
+docker stop n8n_app    # остановить
 ```
 
 ### Watchdog (gpu_watchdog)
@@ -145,13 +215,8 @@ curl -s http://localhost:11434/api/tags | jq '.models[].name'
 | Скрипт | `/home/ubuntu/gpu_watchdog.py` |
 | Unit-файл | `/etc/systemd/system/watchdog.service` |
 | Timer | `/etc/systemd/system/watchdog.timer` |
+| Статус | **Файлы готовы, НЕ ЗАДЕПЛОЕНЫ** |
 | Логика | Проверяет Whisper/Ollama/Diarize, рестартит упавшие; `is_process_busy()` не убивает занятый diarize |
-
-```bash
-sudo systemctl status watchdog.timer
-sudo systemctl list-timers | grep watchdog
-journalctl -u watchdog --since "1 hour ago" --no-pager
-```
 
 ---
 
@@ -168,25 +233,43 @@ journalctl -u watchdog --since "1 hour ago" --no-pager
 
 ---
 
-## Модульная структура приложения (v1.9.6)
+## SSH между серверами
+
+| Параметр | Значение |
+|----------|----------|
+| Направление | 🟢 веб → 🔴 GPU |
+| Ключ | `/root/.ssh/id_ed25519` (web-to-gpu) |
+| Команда | `ssh ubuntu@195.209.214.7` |
+| SCP | `scp <файл> ubuntu@195.209.214.7:/path/` |
+| Скорость | ~80-100 MB/s |
+
+---
+
+## Модульная структура приложения (v1.9.8)
 
 ```
 /opt/transcribe/app/
 ├── server.js          — точка входа, health, version, cleanup, stuck jobs
-├── config.js          — все env переменные
+├── config.js          — все env переменные и пути
 ├── db.js              — БД, таблицы, миграции, seed промпты
+│                        ЭКСПОРТИРУЕТ: { db } — НЕ голый объект!
 ├── middleware.js       — authMiddleware, adminMiddleware
 ├── utils/
 │   ├── helpers.js     — escapeHtml, logEvent, detectFileType, getTranscript
-│   └── email.js       — nodemailer
+│   └── email.js       — nodemailer (SMTP работает)
 ├── routes/
 │   ├── auth.js        — register, login, activate
 │   ├── prompts.js     — CRUD промптов
-│   ├── jobs.js        — upload, list, downloads, rating, delete (soft)
-│   ├── internal.js    — webhook/result, job-result, job-prompt, watchdog-event
-│   └── admin.js       — users, stats, prompts, GPU panel, monitor, events, archive
-└── public/
-    └── index.html     — SPA фронтенд
+│   ├── jobs.js        — upload, list (JOIN prompts), downloads (docx/md/srt/json), rating, delete
+│   ├── internal.js    — webhook/result, job-result (atomic write), job-prompt, watchdog-event
+│   └── admin.js       — users, stats, prompts, GPU panel (shelve/unshelve), monitor, events, archive
+├── public/
+│   └── index.html     — SPA фронтенд
+├── CHEATSHEET.md      — шпаргалка по командам и путям
+├── INFRASTRUCTURE.md  — этот файл
+├── Dockerfile
+├── docker-compose.yml
+└── package.json
 ```
 
 ---
@@ -198,18 +281,24 @@ journalctl -u watchdog --since "1 hour ago" --no-pager
 | Auth URL | `https://api.immers.cloud:5000/v3` |
 | Проект | AlekseyNechaev |
 | Server ID | `8baf5a78-ef09-49c9-8aec-ccccf0a46742` |
-| Config | `~/.config/openstack/clouds.yaml` (на веб-сервере) |
 
 ⚠️ **SHELVE останавливает тариф. SHUTOFF (просто stop) — НЕ останавливает!**
 
+Управление через админку transcribe.melki.top (Монитор → Запустить/Остановить) или через API:
 ```bash
-# С веб-сервера (openstack CLI или через API)
-# Unshelve (запуск)
-openstack server unshelve 8baf5a78-ef09-49c9-8aec-ccccf0a46742
-
-# Shelve (остановка с экономией)
-openstack server shelve 8baf5a78-ef09-49c9-8aec-ccccf0a46742
+# Из Node.js (внутри контейнера)
+docker exec transcribe_app node -e "const {gpuDoAction} = require('./routes/admin'); gpuDoAction('shelve').then(()=>console.log('OK')).catch(e=>console.error(e.message));"
 ```
+
+---
+
+## Батч-скрипты
+
+| Скрипт | Расположение | Назначение |
+|--------|-------------|------------|
+| `batch_diarize.py` | `/tmp/` на 🟢 | Транскрипция файлов: SCP→GPU→diarize→БД |
+| `claude_summaries.py` | `/tmp/` на 🟢 | Генерация саммари через Claude API |
+| `fix_summaries_v3.py` | `/tmp/` на 🟢 | Саммари через Ollama (устаревший) |
 
 ---
 
@@ -228,17 +317,13 @@ openstack server shelve 8baf5a78-ef09-49c9-8aec-ccccf0a46742
 |----------|----------|
 | Репозиторий | `github.com/AlexeyNN74/transcribot_n8n` |
 | Рабочая директория | `/opt/transcribe/app/` (🟢 веб) |
+| Текущая версия | **v1.9.8** (коммит 9130996, 15 Apr) |
 
----
-
-## Токены
-
-| Токен | Назначение |
-|-------|------------|
-| n8n API key | Доступ к n8n REST API (workflow CRUD, execution) |
-| JWT n8n→сайт | Внутренний токен для запросов n8n → app (истекает 2036) |
-
-Значения токенов — в ТЗ или в переменных окружения docker-compose.
+```bash
+cd /opt/transcribe/app
+git add -A && git commit -m "vX.X.X — description" && git push
+docker restart transcribe_app
+```
 
 ---
 
@@ -249,5 +334,9 @@ openstack server shelve 8baf5a78-ef09-49c9-8aec-ccccf0a46742
 3. Heredoc с JS/JSON — **ненадёжен**, использовать Python для создания/патча файлов
 4. 🟢 веб: `jq` отсутствует → `python3 -m json.tool` или `grep`
 5. 🔴 GPU: `jq` есть (v1.6)
-6. Логика вкладок: **Саммари** = всегда Ollama, **Транскрипция** = всегда Whisper/diarize
+6. Логика вкладок: **Саммари** = Claude API, **Транскрипция** = Whisper/diarize
 7. GPU shelve — только при нулевой нагрузке (другие проекты, напр. pdfocr!)
+8. `db.js` экспортирует `{ db }` — пиши `const {db} = require("./db")`
+9. `watch` через SSH не работает — использовать `while true; do ...; sleep 5; done`
+10. Файлы/скрипты → `/tmp/`, не мусорить в `/root/`
+11. n8n API: заголовок `X-N8N-API-KEY`, не Bearer
