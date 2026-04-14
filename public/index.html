@@ -1041,6 +1041,10 @@
                 <div class="ctrl-icon">♻️</div>
                 <div class="ctrl-label">Повторить ошибочные</div>
               </div>
+              <div class="control-btn" onclick="runDiagnostics()">
+                <div class="ctrl-icon">🔍</div>
+                <div class="ctrl-label">Диагностика</div>
+              </div>
             </div>
 
           </div>
@@ -2112,6 +2116,46 @@ async function archiveJournal() {
     });
   }
 })();
+
+async function runDiagnostics() {
+  try {
+    const d = await api('POST', '/api/admin/control/diagnose');
+    var lc = d.global_lock ? '#f59e0b' : '#22c55e';
+    var lt = d.global_lock ? '\u0410\u043a\u0442\u0438\u0432\u0435\u043d (' + d.global_lock_age_min + ' \u043c\u0438\u043d)' : '\u041d\u0435\u0442';
+    var h = '<div style="font-family:system-ui;font-size:14px;max-height:70vh;overflow-y:auto;text-align:left">';
+    h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:16px">';
+    h += '<div style="padding:8px 12px;background:rgba(0,0,0,0.3);border-radius:6px"><span style="color:#999">\U0001f512 Global Lock</span><br><b style="color:' + lc + '">' + lt + '</b></div>';
+    h += '<div style="padding:8px 12px;background:rgba(0,0,0,0.3);border-radius:6px"><span style="color:#999">\U0001f4c1 \u0424\u0430\u0439\u043b\u044b</span><br><b>' + d.uploads_files + '</b> uploads / <b>' + d.result_files + '</b> results</div>';
+    h += '<div style="padding:8px 12px;background:rgba(0,0,0,0.3);border-radius:6px"><span style="color:#999">\u23f3 \u041e\u0447\u0435\u0440\u0435\u0434\u044c</span><br><b>' + d.jobs_in_queue + '</b> \u0437\u0430\u0434\u0430\u043d\u0438\u0439</div>';
+    h += '<div style="padding:8px 12px;background:rgba(0,0,0,0.3);border-radius:6px"><span style="color:#999">\u26a0\ufe0f \u041f\u0440\u043e\u0431\u043b\u0435\u043c\u044b</span><br><b style="color:' + (d.problems_count > 0 ? '#ef4444' : '#22c55e') + '">' + d.problems_count + '</b></div>';
+    h += '</div>';
+    if (d.jobs.length > 0) {
+      for (var i = 0; i < d.jobs.length; i++) {
+        var j = d.jobs[i];
+        var bg = j.problem ? 'rgba(239,68,68,0.15)' : 'rgba(255,255,255,0.03)';
+        var border = j.problem ? '1px solid rgba(239,68,68,0.3)' : '1px solid rgba(255,255,255,0.1)';
+        h += '<div style="padding:8px 12px;margin-bottom:4px;background:' + bg + ';border:' + border + ';border-radius:6px;display:flex;justify-content:space-between;align-items:center">';
+        h += '<div style="flex:1;min-width:0"><div style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="' + j.original_name + '">' + (i+1) + '. ' + j.original_name + '</div>';
+        h += '<div style="font-size:12px;color:#999;margin-top:2px">' + j.size_mb + ' \u041c\u0411' + (j.diarize ? ' \u00b7 \U0001f399\ufe0f \u0434\u0438\u0430\u0440\u0438\u0437\u0430\u0446\u0438\u044f' : '') + ' \u00b7 ' + j.status + '</div>';
+        if (j.problem) { h += '<div style="font-size:12px;color:#ef4444;margin-top:2px">\u26a0\ufe0f ' + j.problem + '</div>'; }
+        h += '</div>';
+        h += '<div style="display:flex;gap:6px;margin-left:12px;font-size:16px">' + (j.file_exists ? '\u2705' : '\u274c') + (j.has_result ? '\U0001f4c4' : '') + (j.has_lock ? '\U0001f512' : '') + '</div>';
+        h += '</div>';
+      }
+    } else {
+      h += '<div style="color:#22c55e;text-align:center;padding:30px;font-size:18px">\u2705 \u041e\u0447\u0435\u0440\u0435\u0434\u044c \u043f\u0443\u0441\u0442\u0430!</div>';
+    }
+    h += '</div>';
+    document.getElementById('notify-icon').textContent = '\U0001f50d';
+    document.getElementById('notify-title').textContent = '\u0414\u0438\u0430\u0433\u043d\u043e\u0441\u0442\u0438\u043a\u0430';
+    document.getElementById('notify-msg').innerHTML = h;
+    var box = document.getElementById('notify-box');
+    box.className = 'notify-box ' + (d.problems_count > 0 ? 'error' : 'success');
+    box.style.maxWidth = '600px';
+    document.getElementById('notify-modal').classList.add('show');
+  } catch(e) { showNotify('\u041e\u0448\u0438\u0431\u043a\u0430: ' + e.message); }
+}
+
 </script>
 <!-- Notification Modal -->
 <div id="notify-modal" onclick="if(event.target===this)closeNotify()">

@@ -2,13 +2,15 @@
 // Version: 1.9.8
 // Updated: 2026-04-11
 
+const fs = require('fs');
+const path = require('path');
 const express = require('express');
 const jwt = require('jsonwebtoken');
 
 const { db } = require('../db');
 const { escapeHtml, logEvent } = require('../utils/helpers');
 const { sendEmail } = require('../utils/email');
-const { JWT_SECRET, GPU_API_KEY, APP_URL } = require('../config');
+const { JWT_SECRET, GPU_API_KEY, APP_URL, RESULTS_PATH, UPLOAD_PATH } = require('../config');
 
 const router = express.Router();
 
@@ -124,6 +126,45 @@ router.post('/watchdog-event', (req, res) => {
   }
 
   res.json({ ok: true });
+});
+
+
+// ===== RECONCILE: import results from disk for pending jobs =====
+router.post('/reconcile', (req, res) => {
+  const authHeader = req.headers['authorization'] || '';
+  if (!authHeader.startsWith('Bearer ')) return res.status(401).json({ error: 'Unauthorized' });
+  try { jwt.verify(authHeader.slice(7), JWT_SECRET); } catch(e) { return res.status(401).json({ error: 'Invalid token' }); }
+  const jobs = db.prepare("SELECT id, filename, original_name, status FROM jobs WHERE status IN ('pending','processing','queued')").all();
+  let fixed = 0;
+  const fixed_names = [];
+  jobs.forEach(j => {
+    const baseName = j.filename.replace(/\.[^/.]+$/, '');
+    const resultPath = path.join(RESULTS_PATH, baseName + '_result.txt');
+    if (fs.existsSync(resultPath)) {
+      const txt = fs.readFileSync(resultPath, 'utf8');
+      db.prepare("UPDATE jobs SET status='completed', result_txt=?, completed_at=datetime('now') WHERE id=?").run(txt, j.id);
+      fixed++;
+      fixed_names.push(j.original_name);
+    }
+  });
+  res.json({ reconciled: fixed, jobs: fixed_names });
+});
+
+
+// ===== MARK JOB AS PROCESSING =====
+router.post('/job-start', (req, res) => {
+  const authHeader = req.headers['authorization'] || '';
+  if (!authHeader.startsWith('Bearer ')) return res.status(401).json({ error: 'Unauthorized' });
+  try { jwt.verify(authHeader.slice(7), JWT_SECRET); } catch(e) { return res.status(401).json({ error: 'Invalid token' }); }
+  const { filename } = req.body;
+  if (!filename) return res.status(400).json({ error: 'filename required' });
+  const job = db.prepare("SELECT id FROM jobs WHERE filename = ?").get(filename);
+  if (job) {
+    db.prepare("UPDATE jobs SET status = 'processing' WHERE id = ?").run(job.id);
+    res.json({ ok: true, job_id: job.id });
+  } else {
+    res.json({ ok: false, message: 'job not found' });
+  }
 });
 
 module.exports = router;
