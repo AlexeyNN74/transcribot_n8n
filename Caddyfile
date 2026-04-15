@@ -1,0 +1,32 @@
+transcribe.melki.top {
+    reverse_proxy app:3000 {
+        transport http {
+            response_header_timeout 3600s
+            dial_timeout 30s
+        }
+    }
+
+    encode gzip
+
+    request_body {
+        max_size 2GB
+    }
+
+    header {
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+        X-XSS-Protection "1; mode=block"
+    }
+}
+
+notebook.melki.top {
+    handle /api/* {
+        reverse_proxy open-notebook-open_notebook-1:5055
+    }
+    handle {
+        basic_auth {
+            magoga $2a$14$yqUceYtS.ilpiUeGLc7xDutN6pttS/C/mrYtQn/X/LbqEbtTzblQK
+        }
+        reverse_proxy open-notebook-open_notebook-1:8502
+    }
+}

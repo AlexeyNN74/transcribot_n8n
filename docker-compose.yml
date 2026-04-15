@@ -1,0 +1,50 @@
+services:
+  app:
+    build: ./app
+    container_name: transcribe_app
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - DB_PATH=/data/db/transcribe.db
+      - UPLOAD_PATH=/data/uploads
+      - RESULTS_PATH=/data/results
+      - GPU_SERVER_URL=http://195.209.214.7:8000
+      - GPU_SERVER_API_KEY=transcribe_secret_2026
+      - SMTP_HOST=smtp.beget.com
+      - SMTP_PORT=465
+      - SMTP_USER=no-reply@melki.top
+      - SMTP_PASS=CuEpKM9FS%9t
+      - SMTP_FROM=no-reply@melki.top
+      - APP_URL=https://transcribe.melki.top
+      - ADMIN_EMAIL=alex_clone@inbox.ru
+      - JWT_SECRET=5aa39e6eed3082fe57158749eecd2c93c815c717af11fc97330e4199e5ef596a
+      - OPENSTACK_AUTH_URL=https://api.immers.cloud:5000/v3
+      - OPENSTACK_USERNAME=AlekseyNechaev
+      - OPENSTACK_PASSWORD=Cng$$Ut2ZNCqgq!nNA
+      - OPENSTACK_PROJECT=AlekseyNechaev
+      - GPU_SERVER_ID=8baf5a78-ef09-49c9-8aec-ccccf0a46742
+      - N8N_URL=http://n8n:5678
+    volumes:
+      - /opt/transcribe/data:/data
+      - /opt/transcribe/app/public:/app/public
+      - /opt/transcribe/app:/app
+      - /app/node_modules
+    networks:
+      - transcribe_net
+  caddy:
+    image: caddy:latest
+    container_name: transcribe_caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /opt/transcribe/caddy/Caddyfile:/etc/caddy/Caddyfile
+      - /opt/transcribe/caddy/data:/data
+      - /opt/transcribe/caddy/config:/config
+    networks:
+      - transcribe_net
+networks:
+  transcribe_net:
+    driver: bridge
