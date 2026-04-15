@@ -61,7 +61,7 @@ def get_gpu_status():
         return "UNKNOWN"
     try:
         data = json.loads(out)
-        return data.get("status", "UNKNOWN")
+        return data if isinstance(data, str) else data.get("status", "UNKNOWN")
     except:
         return "UNKNOWN"
 
