@@ -1,5 +1,5 @@
 # Студия Транскрибации — ШПАРГАЛКА
-# Обновлено: 2026-04-14
+# Обновлено: 2026-04-15
 
 ---
 
@@ -12,6 +12,143 @@
 | **Пользователь** | root | ubuntu |
 | **ОС** | — | Ubuntu 22.04 |
 | **GPU** | — | RTX 3090 |
+
+---
+
+## 🔒 Безопасность — порты (15 апр 2026)
+
+### Принцип: наружу только 22 (SSH) + 80/443 (Caddy). Всё остальное — 127.0.0.1.
+
+| Порт | Сервис | Привязка | Доступ |
+|------|--------|----------|--------|
+| 22 | SSH | 0.0.0.0 | ✅ Норма (fail2ban) |
+| 80, 443 | Caddy (HTTPS) | 0.0.0.0 | ✅ Норма |
+| 5678 | n8n | 127.0.0.1 | 🔒 SSH-туннель |
+| 8502, 5055 | Open Notebook | 127.0.0.1 | 🔒 SSH-туннель |
+| 8000 | SurrealDB | — (docker-сеть) | 🔒 Только из open_notebook |
+| 11434 | Ollama | 127.0.0.1 | 🔒 Только локально |
+| 3000 | transcribe_app | — (docker-сеть) | 🔒 Через Caddy |
+
+### Проверка — ничего лишнего не торчит:
+```bash
+ss -tlnp | grep '0.0.0.0' | grep -vE ':(22|80|443) '
+# Ожидание: пусто
+```
+
+### Доступ к n8n / Open Notebook — через SSH-туннель (Termius):
+```
+Termius → хост → Port Forwarding → правила:
+  Type: Local
+  Local: 127.0.0.1:5678   → Remote: 127.0.0.1:5678    # n8n
+  Local: 127.0.0.1:8502   → Remote: 127.0.0.1:8502    # Open Notebook
+
+Подключиться по SSH → открыть http://localhost:5678 (n8n)
+```
+
+### Как контейнеры запущены (для воспроизведения):
+
+**n8n** — docker run (не compose):
+```bash
+docker run -d --name n8n --restart unless-stopped \
+  -p 127.0.0.1:5678:5678 \
+  --network transcribe_transcribe_net \
+  -v n8n_data:/home/node/.n8n \
+  -v /opt/transcribe/data:/opt/transcribe/data \
+  -v /opt/pdfocr:/opt/pdfocr \
+  -v /root/.ssh:/home/node/.ssh:ro \
+  -v /opt/transcribe/app/scripts:/opt/transcribe/app/scripts:ro \
+  -e NODE_FUNCTION_ALLOW_BUILTIN=fs,path,child_process \
+  -e EXECUTIONS_DATA_PRUNE=true \
+  -e "NODE_OPTIONS=--max-old-space-size=4096" \
+  -e "N8N_RESTRICT_FILE_ACCESS_TO=" \
+  -e EXECUTIONS_DATA_PRUNE_MAX_COUNT=50 \
+  -e N8N_SECURE_COOKIE=false \
+  -e EXECUTIONS_DATA_MAX_AGE=24 \
+  -e N8N_PORT=5678 \
+  -e "NODE_FUNCTION_ALLOW_EXTERNAL=*" \
+  -e EXECUTIONS_CONCURRENCY_PRODUCTION_LIMIT=1 \
+  -e N8N_HOST=0.0.0.0 \
+  -e N8N_PROTOCOL=http \
+  docker.n8n.io/n8nio/n8n:latest
+```
+
+**ollama** — docker run (не compose):
+```bash
+docker run -d --name ollama --restart unless-stopped \
+  -p 127.0.0.1:11434:11434 \
+  -v ollama_data:/root/.ollama \
+  ollama/ollama
+```
+
+**open-notebook** — compose: `/root/open-notebook/docker-compose.yml`
+- SurrealDB: ports убраны (доступ только по docker-сети)
+- Open Notebook: `127.0.0.1:8502`, `127.0.0.1:5055`
+
+**transcribe** — compose: `/opt/transcribe/docker-compose.yml`
+- N8N_URL = `http://n8n:5678` (docker-сеть, не внешний IP)
+
+---
+
+## 🌐 Caddy — домены и reverse proxy
+
+Конфиг: `/opt/transcribe/caddy/Caddyfile`
+
+| Домен | Прокси куда | Auth |
+|-------|-------------|------|
+| transcribe.melki.top | app:3000 | нет (свой JWT) |
+| notebook.melki.top | UI: open_notebook:8502, API: open_notebook:5055 | basic_auth на UI |
+
+```
+Caddy перезагрузка:
+docker exec transcribe_caddy caddy reload --config /etc/caddy/Caddyfile
+
+Добавить нового пользователя в notebook:
+docker exec transcribe_caddy caddy hash-password --plaintext "ПАРОЛЬ"
+→ вставить в Caddyfile: username $2a$14$...
+```
+
+### Open Notebook — compose: `/root/open-notebook/docker-compose.yml`
+- `API_URL=https://notebook.melki.top` (env, фронт ходит через Caddy)
+- SurrealDB: ports убраны, доступ по docker-сети
+- Open Notebook: `127.0.0.1:8502`, `127.0.0.1:5055`
+- **После каждого `docker compose down/up`** — пересоединять сеть:
+```bash
+docker network connect transcribe_transcribe_net open-notebook-open_notebook-1
+docker network connect transcribe_transcribe_net open-notebook-surrealdb-1
+```
+
+### DNS записи (Beget)
+| Запись | IP | Назначение |
+|--------|-----|-----------|
+| transcribe | 212.67.8.251 | Студия Транскрибации |
+| notebook | 212.67.8.251 | Open Notebook |
+| notebook-api | 212.67.8.251 | (не используется, можно удалить) |
+| n8n | 212.67.8.251 | (резерв, Caddy не настроен) |
+| pdf | 195.209.214.7 | PDF OCR (GPU) |
+
+---
+
+## ⏰ Cron-задачи (🟢 веб-сервер)
+
+```bash
+# Просмотр: crontab -l
+* * * * * ANTHROPIC_API_KEY=sk-ant-... /usr/bin/python3 /opt/transcribe/app/scripts/task_runner.py >> /opt/transcribe/data/tasks/runner.log 2>&1
+0 3 * * * /opt/transcribe/app/scripts/backup_db.sh
+0 4 * * * /opt/transcribe/app/scripts/rotate_runner_log.sh
+```
+
+---
+
+## 📊 Таблицы БД
+
+| Таблица | Назначение |
+|---------|-----------|
+| users | Пользователи (email, password, role, active) |
+| jobs | Задания (status, result_txt/srt/json/clean, rating) |
+| prompts | Профили промптов (system + user) |
+| events | Журнал событий (upload, completed, error, gpu) |
+| gpu_sessions | Сессии GPU (unshelve_at, shelve_at, duration_sec, jobs_count) |
+| settings | Key-value настройки |
 
 ---
 
@@ -166,15 +303,15 @@ du -sh /opt/transcribe/data/uploads/
 
 ```bash
 # Заголовок: X-N8N-API-KEY (НЕ Bearer!)
-# URL: http://212.67.8.251:5678
+# URL: http://localhost:5678 (127.0.0.1, не внешний IP!)
 
 # Список workflows
-curl -s -H "X-N8N-API-KEY: <token>" http://212.67.8.251:5678/api/v1/workflows | python3 -m json.tool
+curl -s -H "X-N8N-API-KEY: <token>" http://localhost:5678/api/v1/workflows | python3 -m json.tool
 
 # Активировать workflow
 curl -s -X PATCH -H "X-N8N-API-KEY: <token>" -H "Content-Type: application/json" \
   -d '{"active": true}' \
-  http://212.67.8.251:5678/api/v1/workflows/<id>
+  http://localhost:5678/api/v1/workflows/<id>
 
 # jq НЕ установлен на веб-сервере → python3 -m json.tool
 ```
@@ -210,37 +347,40 @@ watch -n2 nvidia-smi
 
 ---
 
-## Pipeline данных: аудио → БД
+## Pipeline v4: аудио → БД (автоматический)
 
 ```
-АУДИОФАЙЛ
-    ↓
-[diarize_server :8002]  POST /diarize  file=<audio>
-    ↓
-ОТВЕТ JSON:
-  {
-    "segments": [{start, end, speaker, text}, ...],
-    "plain_text": "сплошной текст без спикеров",
-    "stats": {duration_sec, num_speakers, ...}
-  }
-    ↓
-[n8n workflow / batch_diarize.py]  — КОНВЕРТАЦИЯ:
-    ↓
-  result_srt   = SRT с голосами:  "1\n00:08:02,260 --> 00:09:28,150\nГолос 1: текст\n"
-  result_clean = текст с голосами без таймкодов: "Голос 1: текст\n\nГолос 2: ответ"
-  result_json  = JSON.stringify(полный ответ diarize)
-  result_txt   = саммари от Ollama (ОТДЕЛЬНЫЙ ЭТАП, не из diarize!)
-    ↓
-[POST /api/internal/job-result]  — ЗАПИСЬ В БД
-  Auth: Bearer <JWT>
-  Body: {filename, result_txt, result_srt, result_json, result_clean}
-  Ищет job по filename (UUID-имя файла на диске)
+Пользователь загружает файл → transcribe.melki.top
+    ↓ (до 1 мин)
+n8n v4 (Schedule Trigger + Scan & Create Tasks) → /data/tasks/{filename}.json
+    ↓ (до 1 мин)
+task_runner.py (cron каждую минуту, хост)
+    → ensure_gpu_active() → unshelve если SHELVED
+    → gpu_session_start() → запись в gpu_sessions
+    → process_single.py {filename}
+        → SCP на GPU
+        → POST /diarize (или /whisper)
+        → Claude API Haiku (саммари)
+        → JSON в stdout
+    → запись в SQLite (result_txt, result_srt, result_json, result_clean)
+    → если очередь пуста → gpu_session_end() → shelve GPU
 ```
+
+### Файлы pipeline (🟢 /opt/transcribe/app/scripts/)
+| Файл | Назначение |
+|------|------------|
+| task_runner.py | Хост-оркестратор (cron), GPU management, gpu_sessions |
+| process_single.py | Обработка одного файла: SCP→GPU→Claude→JSON (retry 3x) |
+| rotate_runner_log.sh | Ротация runner.log (cron 04:00) |
+| backup_db.sh | Бэкап БД (cron 03:00) |
+| batch_diarize.py | Ручной батч (устаревший) |
+| claude_summaries.py | Ручная перегенерация саммари |
 
 **Ключевое:**
-- Конвертацию diarize JSON → SRT/clean делает НЕ сервер, а n8n/скрипт
-- result_txt (саммари) — отдельный этап через Ollama, не связан с diarize
+- Саммари генерирует **Claude API Haiku** (не Ollama)
+- Конвертацию diarize JSON → SRT/clean делает process_single.py
 - Табы в UI: «Саммари» = result_txt, «Транскрипция» = result_srt/result_clean
+- gpu_sessions отслеживает время работы GPU для биллинга
 
 ---
 
@@ -267,15 +407,18 @@ watch -n2 nvidia-smi
 10. **watch через SSH не работает** — `Error opening terminal: unknown`. Используй `while true; do ...; sleep 5; done`
 11. **$? = код выхода** — `0` = успех, НЕ количество обработанных записей
 12. **Файлы только в /tmp/** — не мусорить в `/root/` или `/home/ubuntu/`
+13. **Порты: наружу ТОЛЬКО 22/80/443** — при создании новых контейнеров ВСЕГДА `-p 127.0.0.1:PORT:PORT`, никогда `0.0.0.0`
+14. **n8n и ollama — docker run** (не compose), пересоздание по команде из раздела «Безопасность»
+15. **Деплой: сначала /tmp/** — загрузить все файлы в /tmp/, потом бэкапы, потом раскладка по папкам
 
 ---
 
 ## Версия приложения
 
-- Текущая: **v1.9.8** (git: edef19a, 11 Apr)
+- Текущая: **v1.9.10** (git: 411a2a1, 15 Apr)
 - Эндпоинт: GET /api/version
 - Git: github.com/AlexeyNN74/transcribot_n8n
-- Git workflow: `git add . && git commit -m "vX.X.X — description" && git push && docker restart transcribe_app`
+- Git workflow: `git add -A && git commit -m "vX.X.X — description" && git push && docker restart transcribe_app`
 
 ---
 
@@ -289,16 +432,35 @@ watch -n2 nvidia-smi
 ├── middleware.js       — auth middleware
 ├── routes/
 │   ├── auth.js        — регистрация, логин, активация
-│   ├── jobs.js        — CRUD задач, загрузка файлов
+│   ├── jobs.js        — CRUD задач, загрузка, переобработка
 │   ├── prompts.js     — промпт-профили
 │   ├── internal.js    — API для n8n (JWT)
-│   └── admin.js       — админ-панель
+│   └── admin.js       — админ-панель, gpu_sessions, мониторинг
 ├── utils/
 │   ├── helpers.js     — cleanupExpired, scanUploads
 │   └── email.js       — nodemailer
+├── scripts/
+│   ├── task_runner.py      — cron-оркестратор pipeline
+│   ├── process_single.py   — обработка файла (retry, валидация)
+│   ├── rotate_runner_log.sh — ротация лога
+│   ├── backup_db.sh        — бэкап БД
+│   ├── batch_diarize.py    — ручной батч (legacy)
+│   └── claude_summaries.py — перегенерация саммари
 ├── public/
 │   └── index.html     — фронтенд (SPA)
 ├── Dockerfile
 ├── docker-compose.yml
 └── package.json
 ```
+
+---
+
+## 📝 CHANGELOG (последние версии)
+
+| Версия | Дата | Что сделано |
+|--------|------|-------------|
+| v1.9.10 | 15 апр | T1 валидация саммари, T2 retry 3x, T3 ротация логов, gpu_sessions, закрытие портов, Caddy proxy для notebook |
+| v1.9.9 | 15 апр | UI: completed_at, days remaining, download marks, batch ZIP, reprocess, row selection |
+| v1.9.8 | 11 апр | Fix double processing, metadata UI, docx fix, diarize v5 |
+| v1.9.7 | 11 апр | Min/max speakers, noise filter, Error Handler v3 |
+| v1.9.6 | 11 апр | Модульность server.js (11 файлов), watchdog prep |
