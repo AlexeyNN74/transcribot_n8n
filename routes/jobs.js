@@ -228,7 +228,7 @@ router.get('/:id/download/docx-clean', authMiddleware, async (req, res) => {
 
   const summary = job.result_txt ? job.result_txt.split('\n---\n')[0].trim() : '';
   let transcript = getTranscript(job);
-  transcript = transcript.replace(/^Голос \d+:\s*/gm, '').replace(/^SPEAKER_\d+:\s*/gm, '');
+  transcript = transcript.replace(/^Голос \d+:?\s*/gm, '').replace(/^SPEAKER_\d+:?\s*/gm, '').replace(/^\s*$/gm, '');
 
   let content = '';
   if (summary) content += summary;
@@ -268,7 +268,7 @@ router.get('/:id/download/docx-clean', authMiddleware, async (req, res) => {
     const baseName = path.basename(job.original_name, path.extname(job.original_name));
 
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
-    res.setHeader('Content-Disposition', `attachment; filename="${baseName}_clean.docx"`);
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(baseName)}_clean.docx`);
     res.send(buffer);
   } catch (e) {
     console.error('[DOCX-CLEAN]', e.message);
