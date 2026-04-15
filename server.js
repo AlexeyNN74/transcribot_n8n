@@ -1,7 +1,7 @@
 // Студия Транскрибации — server.js (модульный)
 'use strict';
 // Version: 1.9.8
-// Updated: 2026-04-11
+// Updated: 2026-04-16
 
 
 const express = require('express');
@@ -37,7 +37,7 @@ app.use('/api', require('./routes/internal'));
 
 // ===== HEALTH & VERSION =====
 app.get('/api/version', (req, res) => res.json({
-  version: '1.9.6', node: process.version, uptime_s: Math.floor(process.uptime())
+  version: '1.9.9', node: process.version, uptime_s: Math.floor(process.uptime())
 }));
 
 app.get('/api/health', (req, res) => {
@@ -46,7 +46,7 @@ app.get('/api/health', (req, res) => {
     const pending    = db.prepare("SELECT COUNT(*) as c FROM jobs WHERE status='pending'").get().c;
     const processing = db.prepare("SELECT COUNT(*) as c FROM jobs WHERE status='processing'").get().c;
     const queued     = db.prepare("SELECT COUNT(*) as c FROM jobs WHERE status='queued'").get().c;
-    res.json({ ok: true, version: '1.9.6', uptime_s: Math.floor(process.uptime()), db: dbOk, queue: { queued, pending, processing } });
+    res.json({ ok: true, version: '1.9.9', uptime_s: Math.floor(process.uptime()), db: dbOk, queue: { queued, pending, processing } });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }
