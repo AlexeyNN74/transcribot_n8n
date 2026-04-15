@@ -1000,6 +1000,22 @@
               </table>
             </div>
 
+            <!-- GPU Sessions -->
+            <div class="chart-card">
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+                <div class="chart-title" style="margin:0">🖥️ GPU сессии</div>
+                <select id="gpu-sessions-days" onchange="loadGpuSessions()" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:4px 10px;border-radius:6px;font-size:12px">
+                  <option value="7">7 дней</option>
+                  <option value="30" selected>30 дней</option>
+                  <option value="90">90 дней</option>
+                </select>
+              </div>
+              <div id="gpu-sessions-totals" class="stats-big-grid" style="margin-bottom:16px"></div>
+              <div id="gpu-sessions-list" style="max-height:300px;overflow-y:auto">
+                <div style="text-align:center;padding:20px;color:var(--text2)">Загрузка...</div>
+              </div>
+            </div>
+
           </div>
           <div id="admin-tab-monitor" class="tab-content">
 
@@ -1299,8 +1315,66 @@ async function loadStatsExtended() {
   } catch (e) {
     console.error('Stats error:', e);
   }
+
+  loadGpuSessions();
 }
 
+async function loadGpuSessions() {
+  const days = document.getElementById('gpu-sessions-days')?.value || 30;
+  try {
+    const d = await api('GET', `/api/admin/gpu-sessions?days=${days}`);
+    const t = d.totals;
+
+    document.getElementById('gpu-sessions-totals').innerHTML = `
+      <div class="stat-big-card">
+        <div class="stat-big-val">${t.total_min}</div>
+        <div class="stat-big-label">Минут GPU</div>
+        <div class="stat-big-sub">за ${d.days} дней</div>
+      </div>
+      <div class="stat-big-card">
+        <div class="stat-big-val">${t.session_count}</div>
+        <div class="stat-big-label">Сессий</div>
+      </div>
+      <div class="stat-big-card">
+        <div class="stat-big-val">${t.total_jobs}</div>
+        <div class="stat-big-label">Заданий</div>
+      </div>
+      <div class="stat-big-card">
+        <div class="stat-big-val">${t.avg_min}</div>
+        <div class="stat-big-label">Сред. мин/сессия</div>
+      </div>
+    `;
+
+    if (!d.sessions.length) {
+      document.getElementById('gpu-sessions-list').innerHTML = '<div style="text-align:center;padding:20px;color:var(--text2)">Нет сессий за этот период</div>';
+      return;
+    }
+
+    document.getElementById('gpu-sessions-list').innerHTML = `
+      <table class="top-users-table">
+        <thead><tr><th>Дата</th><th>Длительность</th><th>Заданий</th><th>Триггер</th><th>Статус</th></tr></thead>
+        <tbody>
+          ${d.sessions.map(s => {
+            const dt = s.unshelve_at ? new Date(s.unshelve_at + 'Z').toLocaleString('ru-RU', {day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}) : '—';
+            const dur = s.duration_sec ? Math.round(s.duration_sec / 60) + ' мин' : '<span style="color:var(--warn)">активна</span>';
+            const trigger = s.trigger_type === 'manual' ? '🖱️' : '🤖';
+            const statusCls = s.status === 'active' ? 'color:var(--success)' : 'color:var(--text2)';
+            return `<tr>
+              <td style="font-size:12px">${dt}</td>
+              <td>${dur}</td>
+              <td>${s.jobs_count || 0}</td>
+              <td>${trigger}</td>
+              <td style="${statusCls};font-size:12px">${s.status}</td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+    `;
+  } catch(e) {
+    console.error('GPU sessions error:', e);
+    document.getElementById('gpu-sessions-list').innerHTML = '<div style="color:var(--text2);padding:12px;font-size:13px">Таблица gpu_sessions ещё не создана — требуется рестарт контейнера</div>';
+  }
+}
 
 
 function startMonitorRefresh() {
@@ -2091,7 +2165,7 @@ function formatSize(bytes) {
 
 function formatDate(str) {
   if (!str) return '—';
-  return new Date(str + 'Z').toLocaleString('ru-RU', { day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit' });
+  return new Date(str).toLocaleString('ru-RU', { day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit' });
 }
 
 function statusLabel(s) {

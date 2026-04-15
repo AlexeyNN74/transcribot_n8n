@@ -1,7 +1,4 @@
 'use strict';
-// Version: 1.9.8
-// Updated: 2026-04-11
-
 const express = require('express');
 const path = require('path');
 const fs = require('fs');
@@ -161,6 +158,40 @@ router.get('/stats/extended', adminMiddleware, (req, res) => {
   });
 });
 
+// ===== GPU SESSIONS =====
+router.get('/gpu-sessions', adminMiddleware, (req, res) => {
+  const days = Math.min(parseInt(req.query.days) || 30, 365);
+
+  const sessions = db.prepare(`
+    SELECT * FROM gpu_sessions
+    WHERE unshelve_at >= datetime('now', '-' || ? || ' days')
+    ORDER BY unshelve_at DESC
+    LIMIT 100
+  `).all(days);
+
+  const totals = db.prepare(`
+    SELECT
+      COUNT(*) as session_count,
+      SUM(CASE WHEN duration_sec IS NOT NULL THEN duration_sec ELSE 0 END) as total_sec,
+      SUM(jobs_count) as total_jobs,
+      AVG(CASE WHEN duration_sec IS NOT NULL THEN duration_sec END) as avg_sec
+    FROM gpu_sessions
+    WHERE unshelve_at >= datetime('now', '-' || ? || ' days')
+      AND status = 'closed'
+  `).get(days);
+
+  res.json({
+    sessions,
+    totals: {
+      session_count: totals.session_count || 0,
+      total_min: Math.round((totals.total_sec || 0) / 60),
+      total_jobs: totals.total_jobs || 0,
+      avg_min: totals.avg_sec ? Math.round(totals.avg_sec / 60 * 10) / 10 : 0,
+    },
+    days
+  });
+});
+
 // ===== PROMPTS ADMIN =====
 router.get('/prompts', adminMiddleware, (req, res) => {
   const prompts = db.prepare(`
@@ -310,6 +341,22 @@ router.post('/gpu/action', adminMiddleware, async (req, res) => {
   try {
     await gpuDoAction(action);
     logEvent('gpu.' + action, null, req.user.id);
+
+    // GPU session tracking
+    if (action === 'unshelve') {
+      const { v4: uuidv4 } = require('uuid');
+      db.prepare("INSERT INTO gpu_sessions (id, unshelve_at, trigger_type, status) VALUES (?, datetime('now'), 'manual', 'active')")
+        .run(uuidv4());
+    } else if (action === 'shelve') {
+      // Закрыть открытую сессию (если есть)
+      db.prepare(`UPDATE gpu_sessions SET
+        shelve_at=datetime('now'),
+        duration_sec=CAST((julianday(datetime('now')) - julianday(unshelve_at)) * 86400 AS REAL),
+        status='closed'
+        WHERE status='active'`)
+        .run();
+    }
+
     res.json({ ok: true, action });
   } catch (e) {
     console.error('[GPU]', e.message);
@@ -414,23 +461,10 @@ router.get('/events', adminMiddleware, (req, res) => {
 
 // ===== CONTROL =====
 router.post('/control/reset-stuck', adminMiddleware, (req, res) => {
-  // Reconcile: import ready results before resetting
-  const allPending = db.prepare("SELECT id, filename, original_name FROM jobs WHERE status IN ('processing', 'pending', 'queued')").all();
-  let reconciled = 0;
-  allPending.forEach(j => {
-    const bn = j.filename.replace(/\.[^/.]+$/, '');
-    const rp = path.join(RESULTS_PATH, bn + '_result.txt');
-    if (fs.existsSync(rp)) {
-      const txt = fs.readFileSync(rp, 'utf8');
-      db.prepare("UPDATE jobs SET status='completed', result_txt=?, completed_at=datetime('now') WHERE id=?").run(txt, j.id);
-      reconciled++;
-    }
-  });
-
   const stuck = db.prepare(
     "SELECT id, original_name FROM jobs WHERE status IN ('processing', 'pending', 'queued') AND created_at < datetime('now', '-2 hours')"
   ).all();
-  if (stuck.length === 0) return res.json({ reset: 0, reconciled, message: reconciled > 0 ? 'Reconciled ' + reconciled + ', no stuck left' : '\u041d\u0435\u0442 \u0437\u0430\u0432\u0438\u0441\u0448\u0438\u0445 \u0437\u0430\u0434\u0430\u043d\u0438\u0439' });
+  if (stuck.length === 0) return res.json({ reset: 0, message: 'Нет зависших заданий' });
 
   const ids = stuck.map(j => j.id);
   db.prepare(
@@ -438,13 +472,13 @@ router.post('/control/reset-stuck', adminMiddleware, (req, res) => {
   ).run(...ids);
 
   if (fs.existsSync(RESULTS_PATH)) {
-    fs.readdirSync(RESULTS_PATH).filter(f => f.endsWith('.lock') || f === '.global_processing').forEach(f => {
+    fs.readdirSync(RESULTS_PATH).filter(f => f.endsWith('.lock')).forEach(f => {
       try { fs.unlinkSync(path.join(RESULTS_PATH, f)); } catch(e) {}
     });
   }
 
-  logEvent('admin.reset_stuck', null, req.user.id, { count: stuck.length, reconciled, jobs: stuck.map(j => j.original_name) });
-  res.json({ reset: stuck.length, reconciled, jobs: stuck });
+  logEvent('admin.reset_stuck', null, req.user.id, { count: stuck.length, jobs: stuck.map(j => j.original_name) });
+  res.json({ reset: stuck.length, jobs: stuck });
 });
 
 router.post('/control/clear-locks', adminMiddleware, (req, res) => {
@@ -542,29 +576,6 @@ router.post('/archive/cleanup', adminMiddleware, (req, res) => {
 
   logEvent('admin.archive_cleanup', null, req.user.id, { deleted: old.length, days });
   res.json({ deleted: old.length, days });
-});
-
-
-// ===== DIAGNOSTICS =====
-router.post('/control/diagnose', adminMiddleware, (req, res) => {
-  const jobs = db.prepare("SELECT j.id, j.filename, j.original_name, j.status, j.diarize, j.created_at, u.name as user_name FROM jobs j JOIN users u ON j.user_id = u.id WHERE j.status IN ('pending','processing','queued') ORDER BY j.created_at ASC").all();
-  const globalLock = path.join(RESULTS_PATH, '.global_processing');
-  const gle = fs.existsSync(globalLock);
-  let gla = null;
-  if (gle) { try { gla = Math.round((Date.now() - fs.statSync(globalLock).mtimeMs) / 60000); } catch(e) {} }
-  const diag = jobs.map(j => {
-    const fe = fs.existsSync(path.join(UPLOAD_PATH, j.filename));
-    const bn = j.filename.replace(/\.[^/.]+$/, '');
-    const hr = fs.existsSync(path.join(RESULTS_PATH, bn + '_result.txt'));
-    const hl = fs.existsSync(path.join(RESULTS_PATH, bn + '.lock'));
-    const sm = fe ? Math.round(fs.statSync(path.join(UPLOAD_PATH, j.filename)).size/1024/1024) : 0;
-    let p = null;
-    if (!fe) p = 'File missing'; else if (hr && j.status!=='completed') p = 'Result exists'; else if (hl) p = 'Lock';
-    return {original_name:j.original_name, status:j.status, size_mb:sm, diarize:j.diarize?1:0, file_exists:fe, has_result:hr, has_lock:hl, problem:p, user:j.user_name};
-  });
-  const uc = fs.existsSync(UPLOAD_PATH)?fs.readdirSync(UPLOAD_PATH).filter(f=>/\.(mp4|mp3|wav|m4a|avi|mov|mkv|webm|ogg|flac)$/i.test(f)).length:0;
-  const rc = fs.existsSync(RESULTS_PATH)?fs.readdirSync(RESULTS_PATH).filter(f=>f.endsWith('_result.txt')).length:0;
-  res.json({global_lock:gle, global_lock_age_min:gla, uploads_files:uc, result_files:rc, jobs_in_queue:jobs.length, problems_count:diag.filter(d=>d.problem).length, jobs:diag});
 });
 
 module.exports = router;

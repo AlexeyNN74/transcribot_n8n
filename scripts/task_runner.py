@@ -19,6 +19,7 @@ import time
 import os
 import glob
 import fcntl
+import uuid
 
 # ═══════════════════════════════════════════════════
 # Конфигурация
@@ -117,6 +118,57 @@ def shelve_gpu():
     log("Shelving GPU...")
     rc, out, err = run_cmd(SHELVE_CMD, timeout=30)
     log(f"Shelve: {out} {err}")
+
+
+# ═══════════════════════════════════════════════════
+# GPU session tracking
+# ═══════════════════════════════════════════════════
+
+_current_session_id = None
+
+def gpu_session_start():
+    """Создаёт запись о начале GPU-сессии"""
+    global _current_session_id
+    sid = str(uuid.uuid4())
+    _current_session_id = sid
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute(
+            "INSERT INTO gpu_sessions (id, unshelve_at, trigger_type, status) VALUES (?, datetime('now'), 'auto', 'active')",
+            (sid,)
+        )
+        conn.commit()
+        conn.close()
+        log(f"GPU session started: {sid[:8]}")
+    except Exception as e:
+        log(f"GPU session start error: {e}")
+    return sid
+
+
+def gpu_session_end(job_ids_list):
+    """Закрывает текущую GPU-сессию"""
+    global _current_session_id
+    sid = _current_session_id
+    if not sid:
+        return
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute(
+            """UPDATE gpu_sessions SET
+                shelve_at=datetime('now'),
+                duration_sec=CAST((julianday(datetime('now')) - julianday(unshelve_at)) * 86400 AS REAL),
+                jobs_count=?,
+                job_ids=?,
+                status='closed'
+               WHERE id=?""",
+            (len(job_ids_list), json.dumps(job_ids_list), sid)
+        )
+        conn.commit()
+        conn.close()
+        log(f"GPU session closed: {sid[:8]}, jobs={len(job_ids_list)}")
+    except Exception as e:
+        log(f"GPU session end error: {e}")
+    _current_session_id = None
 
 
 # ═══════════════════════════════════════════════════
@@ -238,6 +290,9 @@ def main():
         lock_fd.close()
         sys.exit(1)
 
+    # Начинаем GPU-сессию
+    gpu_session_start()
+
     if not check_gpu_services():
         log("GPU сервисы не готовы — задачи откладываются")
         lock_fd.close()
@@ -245,9 +300,19 @@ def main():
 
     # Обрабатываем задачи
     success = 0
+    processed_filenames = []
     for task_file in tasks:
+        # Читаем filename из task для отчёта
+        try:
+            with open(task_file, 'r') as f:
+                task_data = json.load(f)
+            fname = task_data.get("filename", os.path.basename(task_file))
+        except:
+            fname = os.path.basename(task_file)
+
         if process_task(task_file):
             success += 1
+            processed_filenames.append(fname)
         else:
             # При ошибке — не продолжаем, разберёмся в следующем запуске
             break
@@ -258,6 +323,7 @@ def main():
 
     if not remaining:
         log("Queue empty — shelving GPU")
+        gpu_session_end(processed_filenames)
         shelve_gpu()
     else:
         log(f"Remaining tasks: {len(remaining)} — GPU stays active")

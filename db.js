@@ -1,7 +1,4 @@
 'use strict';
-// Version: 1.9.8
-// Updated: 2026-04-11
-
 const Database = require('better-sqlite3');
 const { v4: uuidv4 } = require('uuid');
 const { DB_PATH } = require('./config');
@@ -70,6 +67,18 @@ db.exec(`
     created_at TEXT DEFAULT (datetime('now')),
     FOREIGN KEY(user_id) REFERENCES users(id)
   );
+
+  CREATE TABLE IF NOT EXISTS gpu_sessions (
+    id TEXT PRIMARY KEY,
+    unshelve_at TEXT NOT NULL,
+    shelve_at TEXT,
+    duration_sec REAL,
+    jobs_count INTEGER DEFAULT 0,
+    job_ids TEXT DEFAULT '[]',
+    trigger_type TEXT DEFAULT 'auto',
+    status TEXT DEFAULT 'active'
+  );
+  CREATE INDEX IF NOT EXISTS idx_gpu_sessions_unshelve ON gpu_sessions(unshelve_at);
 `);
 
 // ===== MIGRATIONS =====
