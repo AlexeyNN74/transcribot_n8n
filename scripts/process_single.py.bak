@@ -77,60 +77,6 @@ def run_cmd(cmd, timeout=None):
 
 
 # ═══════════════════════════════════════════════════
-# T-2: Retry с экспоненциальным backoff
-# ═══════════════════════════════════════════════════
-
-MAX_RETRIES = 3
-
-def retry(fn, label, retries=MAX_RETRIES, backoff=10):
-    """Обёртка для повторных попыток. fn() должен вернуть (result, error)"""
-    for attempt in range(1, retries + 1):
-        result, error = fn()
-        if error is None:
-            return result, None
-        if attempt < retries:
-            wait = backoff * attempt
-            log(f"[RETRY] {label}: attempt {attempt}/{retries} failed ({error}), wait {wait}s...")
-            time.sleep(wait)
-        else:
-            log(f"[RETRY] {label}: all {retries} attempts failed")
-            return None, error
-    return None, "retry exhausted"
-
-
-# ═══════════════════════════════════════════════════
-# T-1: Валидация саммари
-# ═══════════════════════════════════════════════════
-
-BAD_SUMMARY_STARTS = [
-    "Ваш", "Из ваш", "Из данн", "Из этог", "Из предоставлен",
-    "Кажется", "Похоже", "Давайте", "Можете", "Вот основн",
-    "Я вижу", "Я замет", "Мне кажется", "Позвольте",
-    "Хотите", "Могу помочь", "Если вам", "Рад помочь",
-    "Это звучит", "Это очень", "К сожалению",
-]
-
-def validate_summary(summary, clean_text_len):
-    """Проверяет саммари на мусор. Возвращает (is_valid, warning)"""
-    if not summary or len(summary.strip()) < 30:
-        return False, "summary_too_short"
-
-    if summary.startswith("(ошибка"):
-        return False, "claude_api_error"
-
-    first_line = summary.strip().split('\n')[0]
-    for bad in BAD_SUMMARY_STARTS:
-        if first_line.startswith(bad):
-            return False, f"chatbot_style:{bad}"
-
-    # Если транскрипция > 500 символов, а саммари < 100 — подозрительно
-    if clean_text_len > 500 and len(summary.strip()) < 100:
-        return False, "suspiciously_short"
-
-    return True, None
-
-
-# ═══════════════════════════════════════════════════
 # SRT конвертация
 # ═══════════════════════════════════════════════════
 
@@ -378,19 +324,15 @@ def main():
         sys.exit(1)
     log(f"SCP: {time.time()-t0:.0f}s")
 
-    # 3. Транскрипция (с retry)
+    # 3. Транскрипция
     t0 = time.time()
     if args.diarize:
-        def do_diarize():
-            return process_diarize(
-                remote_path, result_path,
-                args.min_speakers, args.max_speakers, args.noise_filter
-            )
-        result, error = retry(do_diarize, "diarize")
+        result, error = process_diarize(
+            remote_path, result_path,
+            args.min_speakers, args.max_speakers, args.noise_filter
+        )
     else:
-        def do_whisper():
-            return process_whisper(remote_path, result_path)
-        result, error = retry(do_whisper, "whisper")
+        result, error = process_whisper(remote_path, result_path)
 
     if error:
         print(json.dumps({"error": error}))
@@ -401,22 +343,11 @@ def main():
     elapsed = time.time() - t0
     log(f"Transcription: {elapsed:.0f}s, SRT={len(result['result_srt'])} chars")
 
-    # 4. Claude API саммари (с retry)
-    def do_summary():
-        s = generate_summary(result["result_clean"], api_key)
-        valid, warning = validate_summary(s, len(result["result_clean"]))
-        if not valid:
-            return None, f"bad_summary:{warning}"
-        return s, None
-
-    summary, sum_error = retry(do_summary, "claude_summary")
-    if sum_error:
-        log(f"Summary validation failed after retries: {sum_error}")
-        summary = f"(⚠️ саммари не прошло валидацию: {sum_error})"
-
+    # 4. Claude API саммари
+    summary = generate_summary(result["result_clean"], api_key)
     timestamp = time.strftime("%d.%m.%Y, %H:%M:%S")
     result_txt = f"Обработано: {timestamp}\n{'═' * 60}\n{summary}"
-    log(f"Summary: {len(summary)} chars, valid={sum_error is None}")
+    log(f"Summary: {len(summary)} chars")
 
     # 5. Чистим GPU
     run_cmd(f'ssh {GPU_HOST} "rm -f {remote_path} {result_path}"')
