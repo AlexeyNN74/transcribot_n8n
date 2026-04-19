@@ -99,10 +99,10 @@ app.post('/api/gpu/action', adminMiddleware, async (req, res) => {
 function cleanupExpiredJobs() {
   const expired = db.prepare("SELECT * FROM jobs WHERE expires_at < datetime('now') AND status IN ('completed','error') AND status!='archived'").all();
   expired.forEach(job => {
-    const filePath = path.join(UPLOAD_PATH, path.basename(job.filename));
+    const filePath = require('path').join(UPLOAD_PATH, require('path').basename(job.filename));
     if (filePath.startsWith(UPLOAD_PATH) && require('fs').existsSync(filePath)) require('fs').unlinkSync(filePath);
-    db.prepare('DELETE FROM jobs WHERE id = ?').run(job.id);
-    console.log(`Cleaned up expired job: ${job.id}`);
+    db.prepare("UPDATE jobs SET status='archived', archived_at=datetime('now') WHERE id=?").run(job.id);
+    console.log(`Soft-deleted expired job: ${job.id}`);
   });
 }
 setInterval(cleanupExpiredJobs, 60 * 60 * 1000);

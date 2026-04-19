@@ -444,6 +444,10 @@ router.get('/events', adminMiddleware, (req, res) => {
   const params = [];
   if (eventType) { where += ' AND event_type LIKE ?'; params.push(eventType + '%'); }
   if (jobId) { where += ' AND job_id = ?'; params.push(jobId); }
+  const from = req.query.from || null;
+  const to = req.query.to || null;
+  if (from) { where += ' AND e.timestamp >= ?'; params.push(from); }
+  if (to) { where += ' AND e.timestamp <= ?'; params.push(to); }
 
   const events = db.prepare(`
     SELECT e.*, j.original_name, u.name as user_name, u.email as user_email
@@ -505,6 +509,7 @@ router.post('/control/reset-errors', adminMiddleware, (req, res) => {
 router.post('/control/archive-journal', adminMiddleware, (req, res) => {
   const events = db.prepare('SELECT * FROM events ORDER BY timestamp ASC').all();
   if (events.length === 0) return res.json({ archived: 0, message: 'Журнал пуст' });
+  const archivedJobIds = new Set(db.prepare("SELECT id FROM jobs WHERE status='archived'").all().map(r => r.id));
 
   const archiveDir = path.join(RESULTS_PATH, 'archives');
   if (!fs.existsSync(archiveDir)) fs.mkdirSync(archiveDir, { recursive: true });
@@ -512,7 +517,7 @@ router.post('/control/archive-journal', adminMiddleware, (req, res) => {
   const archivePath = path.join(archiveDir, 'events_' + ts + '.json');
   fs.writeFileSync(archivePath, JSON.stringify(events, null, 2));
 
-  db.prepare('DELETE FROM events').run();
+  db.prepare("DELETE FROM events WHERE job_id IS NULL OR job_id NOT IN (SELECT id FROM jobs WHERE status='archived')").run();
   logEvent('admin.archive_journal', null, req.user.id, { archived: events.length, file: archivePath });
 
   res.json({ archived: events.length, file: 'events_' + ts + '.json' });
