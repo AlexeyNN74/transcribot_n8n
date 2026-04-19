@@ -1182,6 +1182,7 @@
 let currentUser = null;
 let selectedFiles = [];
 let jobsRefreshInterval = null;
+let hasProcessingJobs = false;
 
 // ===== API =====
 async function api(method, url, data = null, isFile = false) {
