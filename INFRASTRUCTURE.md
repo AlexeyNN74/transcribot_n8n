@@ -1,6 +1,6 @@
-# INFRASTRUCTURE.md — Студия Транскрибации + PDF OCR
+# INFRASTRUCTURE.md — Платформа melki.top
 
-**Обновлено:** 19 апреля 2026 (чат #12)
+**Обновлено:** 19 апреля 2026, чат #15
 
 ---
 
@@ -8,118 +8,121 @@
 
 | Параметр | 🟢 Веб-сервер | 🔴 GPU-сервер |
 |----------|---------------|---------------|
-| Хост | `transcribe.melki.top` / `212.67.8.251` | `195.209.214.7` (supreme, immers.cloud) |
+| Хост | `212.67.8.251` (Beget VPS) | `195.209.214.7` (immers.cloud, supreme) |
 | ОС | Ubuntu 22.04 | Ubuntu 22.04 |
-| RAM | 3.8 GB | 24 GB VRAM (RTX 3090) |
 | Пользователь | `root` | `ubuntu` |
-| SSH | `ssh root@212.67.8.251` | `ssh ubuntu@195.209.214.7` |
-| GPU | — | NVIDIA RTX 3090 24GB |
-| Хостинг | Beget VPS | immers.cloud (OpenStack) |
+| RAM | 3.8 GB | — |
+| GPU | — | NVIDIA RTX 3090 (24 GB VRAM) |
+| SSH | `ssh root@212.67.8.251` | `ssh -i /root/.ssh/id_ed25519 ubuntu@195.209.214.7` |
 
 ---
 
 ## 🟢 Веб-сервер — сервисы
 
-### Транскрибация (transcribe_app) — v1.9.11
+### Транскрибация (transcribe_app) — v1.9.12
 
 | Параметр | Значение |
 |----------|----------|
 | Контейнер | `transcribe_app` |
-| Образ | `node:20-alpine` (собственный Dockerfile) |
-| Порт | `3000` (внутри контейнера) |
-| Внешний доступ | `https://transcribe.melki.top` (через Caddy + Authentik) |
-| Путь на хосте | `/opt/transcribe/app/` |
-| Volume (код) | `/opt/transcribe/app:/app` |
-| Volume (данные) | `/opt/transcribe/data:/data` |
-| Volume node_modules | `/app/node_modules` (анонимный) |
-| БД | `/data/db/transcribe.db` (SQLite, better-sqlite3) |
-| Загрузки | `/data/uploads/` |
-| Результаты | `/data/results/` |
-| docker-compose | `/opt/transcribe/docker-compose.yml` |
-| Git | `github.com/AlexeyNN74/transcribot_n8n` |
-| Commit | `9213b8a` |
+| Образ | `node:20-alpine` (Dockerfile + openssh-client) |
+| Порт | `3000` (внутренний) |
+| URL | `https://transcribe.melki.top` (Authentik + Caddy) |
+| Путь | `/opt/transcribe/app/` |
+| БД | `/opt/transcribe/data/db/transcribe.db` (SQLite) |
+| Pipeline | Callback: gpu-pipeline.js → SSH nohup → callback → Claude Haiku |
+| Git | `/opt/transcribe/app/` → github.com/AlexeyNN74/transcribot_n8n |
 
-**Команды:**
-```bash
-docker restart transcribe_app
-docker logs -f transcribe_app --tail 100
-curl -s https://transcribe.melki.top/api/version
+Модульная структура:
+```
+/opt/transcribe/app/
+├── server.js, config.js, db.js, middleware.js
+├── routes/ (auth.js, jobs.js, prompts.js, internal.js, admin.js)
+├── utils/ (helpers.js, email.js, gpu-pipeline.js)
+└── public/index.html
 ```
 
-**Таблицы БД:**
-- `users` — пользователи (id, email, password, name, role, active)
-- `jobs` — задания (id, user_id, status, result_txt/srt/json/clean, completed_at, expires_at, archived_at)
-- `prompts` — профили промптов (system + user)
-- `events` — журнал событий (timestamp, event_type, job_id, user_id, details)
-- `settings` — ключ-значение
-
-### PDF OCR (pdfocr_app) — v2.2
+### PDF OCR (pdfocr_app) — v2.6
 
 | Параметр | Значение |
 |----------|----------|
 | Контейнер | `pdfocr_app` |
-| Порт | `3001` (внутри контейнера) |
-| Внешний доступ | `https://pdf.melki.top` (через Caddy) |
-| Путь на хосте | `/opt/pdfocr/app/` |
+| Образ | `node:20-alpine` |
+| Порт | `3001` (внутренний) |
+| URL | `https://pdf.melki.top` (Authentik + Caddy) |
+| Путь | `/opt/pdfocr/app/` |
 | БД | `/opt/pdfocr/data/db/pdfocr.db` (SQLite) |
-| docker-compose | `/opt/pdfocr/app/docker-compose.yml` |
-| Git | локальный (`/opt/pdfocr/app/`) |
-| Commit | `2ec80e5` |
-| SSH ключ | `/root/.ssh/id_ed25519` |
-| Контейнер shell | `sh` (Alpine, НЕ bash) |
+| Pipeline | Callback: app.js → SSH nohup gpu_wrapper.py → callback |
+| Git | `/opt/pdfocr/.git` |
+| DOCX | md2docx.js v2.0 (6 встроенных схем + пользовательские профили) |
+| Internal API | `/api/internal/*` с X-Internal-Token |
 
-**Команды:**
+### Caddy (transcribe_caddy)
+
+| Параметр | Значение |
+|----------|----------|
+| Контейнер | `transcribe_caddy` |
+| Конфиг | `/opt/transcribe/caddy/Caddyfile` |
+| Функции | TLS, reverse proxy, Authentik forward_auth |
+
+Домены:
+- `transcribe.melki.top` → transcribe_app:3000 (Authentik + internal bypass)
+- `pdf.melki.top` → pdfocr_app:3001 (Authentik + WS bypass + internal bypass)
+- `hub.melki.top` → /opt/hub (Authentik)
+- `auth.melki.top` → melki-auth:3333
+- `authentik.melki.top` → authentik-server:9000
+- `notebook.melki.top` → per-user containers (Authentik)
+- `claw.melki.top` → openclaw (Authentik + WS bypass)
+- `amdin.melki.top` → melki-admin:3001 (admins only)
+
 ```bash
-docker restart pdfocr_app
-docker logs -f pdfocr_app --tail 100
+docker exec transcribe_caddy caddy reload --config /etc/caddy/Caddyfile
 ```
 
-**Таблицы БД:**
-- `users` — пользователи
-- `jobs` — задания (id, user_id, status, output_md, output_json, gpu_pid, progress, progress_msg)
-- `docx_profiles` — пользовательские DOCX-профили (user_id, name, config JSON, макс 3)
+### Authentik
 
-### n8n
+| Параметр | Значение |
+|----------|----------|
+| Контейнер | `authentik-server` |
+| Provider | `melki-forward-auth` (mode: forward_domain) |
+| Cookie domain | `melki.top` (покрывает все *.melki.top) |
+| Application | `melki-platform` |
+
+### n8n (ОТКЛЮЧЁН для транскрибации)
 
 | Параметр | Значение |
 |----------|----------|
 | Контейнер | `n8n` |
-| Порт | `127.0.0.1:5678` (только локально) |
-| URL | `http://212.67.8.251:5678` (с хоста) |
+| Порт | `127.0.0.1:5678` (закрыт снаружи) |
+| URL | `http://212.67.8.251:5678` (только внутри) |
+| Статус | task_runner.py ОТКЛЮЧЁН, pipeline заменён на callback |
 | NODE_OPTIONS | `--max-old-space-size=4096` |
 
-**Workflow'ы:**
-- **Секретарь таймкодов v3** — ID: `ho6fwPPZOip7eXof`
-- **Error Handler** — ID: `zOnO3fTBxyxoJ4LS`
+### Claude-прокси
 
-### Caddy (reverse proxy)
+| Параметр | Значение |
+|----------|----------|
+| Тип | systemd service |
+| Порт | `5680` |
 
-| Домен | Backend |
-|-------|---------|
-| `transcribe.melki.top` | `:3000` (+ Authentik forward_auth) |
-| `pdf.melki.top` | `:3001` |
-| `auth.melki.top` | Authentik |
+### Порты (все закрыты для внешнего доступа)
 
-### Другие контейнеры
-
-| Контейнер | Порт | Назначение |
-|-----------|------|------------|
-| `ollama` | `127.0.0.1:11434` | LLM (локальный) |
-| `speaches` | `127.0.0.1:8969` | TTS |
-| `nb-*` | не проброшены | Open Notebook (multi-tenant) |
-
-### Cron
-
-| Расписание | Скрипт | Назначение |
-|------------|--------|------------|
-| `* * * * *` | `task_runner.py` | Pipeline транскрибации (автоцикл) |
-| `0 3 * * *` | `backup_db.sh` | Бэкап transcribe.db |
+| Порт | Сервис | Bind |
+|------|--------|------|
+| 443 | Caddy (HTTPS) | 0.0.0.0 |
+| 3000 | transcribe_app | внутренний (Docker) |
+| 3001 | pdfocr_app | внутренний (Docker) |
+| 5678 | n8n | 127.0.0.1 |
+| 5680 | Claude-прокси | 0.0.0.0 |
+| 8969 | speaches | 127.0.0.1 |
+| 11434 | ollama (local) | 127.0.0.1 |
 
 ---
 
 ## 🔴 GPU-сервер — сервисы
 
-### Whisper
+**Статус по умолчанию: SHELVED (auto-shelve после обработки)**
+
+### Whisper (whisper_server)
 
 | Параметр | Значение |
 |----------|----------|
@@ -127,109 +130,65 @@ docker logs -f pdfocr_app --tail 100
 | Модель | `deepdml/faster-whisper-large-v3-turbo-ct2` |
 | Порт | `:8000` |
 | docker-compose | `/root/whisper/docker-compose.yml` |
-| Env | `WHISPER__COMPUTE_TYPE=float16` |
 | Restart | `unless-stopped` |
+| Env | `WHISPER__COMPUTE_TYPE=float16` |
 
-### Diarize (v5)
+### Diarize (v5, systemd)
 
 | Параметр | Значение |
 |----------|----------|
-| Тип | systemd service |
-| Скрипт | `/home/ubuntu/diarize_server.py` |
+| Скрипт | `/home/ubuntu/diarize_server.py` (v5) |
 | Порт | `:8002` |
-| Особенности | Чанки, ffmpeg, шумоподавление (light/aggressive), однопоточный |
+| Unit | `/etc/systemd/system/diarize.service` |
+| Noise filter | light=«Zoom» (hp80+anlmdn3), aggressive=«Кафе» (lp6000+anlmdn3) |
 
-### Ollama
+### Ollama (ollama_engine)
 
 | Параметр | Значение |
 |----------|----------|
 | Контейнер | `ollama_engine` |
 | Порт | `:11434` |
-| Модели | `qwen2.5:14b` (основная), `qwen2:7b` |
+| Модели | `qwen2.5:14b` (primary), `qwen2:7b` |
 
-### Marker (PDF OCR)
+### Marker/Surya (marker_service)
 
 | Параметр | Значение |
 |----------|----------|
 | Контейнер | `marker_service` |
-| Назначение | PDF → MD конвертация |
+| OCR скрипт | `/app/pdf_ocr_vX_4.py` |
+| Данные IN | `/n8n_media/IN/` |
+| Данные OUT | `/n8n_media/OUT/` |
 
-### gpu_wrapper.py
+### GPU Wrapper (gpu_wrapper.py)
 
 | Параметр | Значение |
 |----------|----------|
-| Путь | `/home/ubuntu/gpu_wrapper.py` |
-| Назначение | nohup + HTTP callbacks для PDF OCR |
+| Скрипт | `/home/ubuntu/gpu_wrapper.py` |
+| Symlink | `/opt/gpu-wrapper.py` → `/home/ubuntu/gpu_wrapper.py` |
+| Функция | Универсальный wrapper: nohup + callbacks (started/progress/done/error) |
+| Используется | Транскрибация + PDF OCR |
 
-### Watchdog (НЕ ЗАДЕПЛОЕН)
+### Watchdog (systemd timer)
 
 | Параметр | Значение |
 |----------|----------|
 | Скрипт | `/home/ubuntu/gpu_watchdog.py` |
-| Статус | Файлы готовы, systemd не настроен |
+| Интервал | каждые 3 мин |
+| Логика | Проверяет Whisper/Ollama/Diarize, рестартит упавшие |
 
----
+### Скрипты обработки
 
-## Порты (сводка)
+| Скрипт | Назначение |
+|--------|------------|
+| `gpu_wrapper.py` | Универсальный callback wrapper |
+| `transcribe_gpu.py` | Транскрибация: diarize+whisper локально |
 
-### 🟢 Веб-сервер
-| Порт | Сервис | Доступ |
-|------|--------|--------|
-| 443 | Caddy (HTTPS) | Внешний |
-| 3000 | transcribe_app | Внутренний |
-| 3001 | pdfocr_app | Внутренний |
-| 5678 | n8n | 127.0.0.1 only |
-| 5680 | Claude-proxy | systemd |
-| 8969 | speaches | 127.0.0.1 only |
-| 11434 | ollama | 127.0.0.1 only |
+### Healthcheck
 
-### 🔴 GPU-сервер
-| Порт | Сервис |
-|------|--------|
-| 8000 | Whisper |
-| 8001 | Marker |
-| 8002 | Diarize |
-| 11434 | Ollama |
-
----
-
-## Модульная структура транскрибации (v1.9.11)
-
-```
-/opt/transcribe/app/
-├── server.js          — entry point, cleanup, stuck jobs
-├── config.js          — env переменные
-├── db.js              — таблицы, миграции, seed промпты
-├── middleware.js       — authMiddleware, adminMiddleware
-├── utils/
-│   ├── helpers.js     — escapeHtml, logEvent, detectFileType, getTranscript
-│   └── email.js       — nodemailer (smtp.beget.com)
-├── routes/
-│   ├── auth.js        — register, login, activate
-│   ├── prompts.js     — CRUD промптов
-│   ├── jobs.js        — upload, list, downloads, rating, soft delete
-│   ├── internal.js    — webhook/result, job-result, job-prompt
-│   └── admin.js       — users, stats, GPU panel, monitor, events (from/to), archive
-└── public/
-    └── index.html     — SPA (чекбоксы, подсветка, архив заданий, массовые действия)
-```
-
-## Файловая структура PDF OCR
-
-```
-/opt/pdfocr/
-├── app/
-│   ├── app.js              — v2.2 (Подход Б + DOCX + профили)
-│   ├── md2docx.js          — v1.2, resolveScheme(), 2 встроенные + кастомные схемы
-│   ├── package.json        — docx ^8.5.0
-│   ├── Dockerfile
-│   ├── docker-compose.yml  — CALLBACK_SECRET, OPENSTACK_PASSWORD
-│   ├── .env                — SMTP credentials
-│   └── .gitignore
-└── data/
-    ├── db/pdfocr.db
-    ├── uploads/
-    └── results/{jobId}/    — MD + DOCX файлы
+```bash
+curl -s http://195.209.214.7:8002/health   # diarize
+curl -s http://195.209.214.7:8000/health   # whisper
+curl -s http://195.209.214.7:11434/api/tags # ollama
 ```
 
 ---
@@ -242,29 +201,72 @@ docker logs -f pdfocr_app --tail 100
 | Проект | AlekseyNechaev |
 | Server ID | `8baf5a78-ef09-49c9-8aec-ccccf0a46742` |
 
-⚠️ **SHELVE останавливает тариф. SHUTOFF (stop) — НЕ останавливает!**
+⚠️ **Только SHELVE останавливает тариф. SHUTOFF — НЕ останавливает!**
 
-Auto-shelve работает через API: `POST /api/admin/gpu/action` + internal JWT.
+Auto-shelve: оба сервиса (transcribe + pdfocr) проверяют GPU load и shelve'ят через API после grace period. Координация: nvidia-smi check перед shelve.
+
+---
+
+## Pipeline обработки
+
+### Транскрибация (callback pipeline v1.9.12)
+```
+Upload → gpu-pipeline.js → unshelve GPU → SCP файл
+→ SSH nohup transcribe_gpu.py → callbacks (progress)
+→ SCP результат ← GPU → Claude Haiku (саммари)
+→ DB → email → auto-shelve
+```
+
+### PDF OCR (callback pipeline v2.6)
+```
+Upload → processQueue() → unshelve GPU → SCP файл
+→ SSH nohup gpu_wrapper.py → callbacks (progress)
+→ SCP результат ← GPU → DB → email → webhooks
+→ auto-shelve
+```
+
+---
+
+## Токены и секреты
+
+| Токен | Назначение | Где |
+|-------|------------|-----|
+| n8n API key | REST API n8n | env N8N_API_KEY |
+| JWT internal | n8n→transcribe (expires 2036) | env INTERNAL_JWT |
+| Callback secret | GPU→CPU callbacks | env CALLBACK_SECRET |
+| PDF OCR internal token | Межсервисный API | env INTERNAL_TOKEN (default: pdfocr_internal_2026) |
+| ANTHROPIC_API_KEY | Claude API (Haiku) для саммари | env |
+| OPENSTACK_PASSWORD | GPU management | env |
 
 ---
 
 ## Бэкапы
 
-| Сервер | Путь | Содержимое |
-|--------|------|------------|
-| 🟢 веб | `/opt/transcribe/backups/` | Cron 03:00 — transcribe.db |
-| 🟢 веб | `/opt/transcribe/backups/2026-04-11/` | Полный: server.js, index.html, etc. |
-| 🔴 GPU | `/home/ubuntu/backups/2026-04-11/` | whisper-compose.yml, diarize.service |
+| Что | Где | Когда |
+|-----|-----|-------|
+| transcribe.db | `/opt/transcribe/backups/` | cron 03:00 ежедневно |
+| pdfocr файлы | `/opt/pdfocr/backups/2026-04-19/` | ручной перед деплоем |
+| GPU скрипты | `/home/ubuntu/backups/2026-04-11/` | ручной |
+
+---
+
+## Git
+
+| Проект | Путь | Remote |
+|--------|------|--------|
+| Транскрибация | `/opt/transcribe/app/` | github.com/AlexeyNN74/transcribot_n8n |
+| PDF OCR | `/opt/pdfocr/` | (local only) |
 
 ---
 
 ## Важные правила
 
 1. После изменения файлов → **`docker restart transcribe_app`** / **`docker restart pdfocr_app`**
-2. После изменения env в docker-compose.yml → **`docker compose down && docker compose up -d --build`**
-3. Heredoc с JS/JSON — **ненадёжен**, использовать Python для создания/патча файлов
-4. 🟢 веб: `jq` отсутствует → `python3 -m json.tool`
-5. 🔴 GPU: `jq` ✅ (v1.6), Ollama = Docker, Whisper = docker-compose, Diarize = systemd
-6. pdfocr контейнер: Alpine = `sh`, не `bash`
-7. GPU shelve — координировать с pdfocr (обе системы используют один GPU)
-8. Файл на сервере может отличаться от project knowledge — всегда проверять `sed -n` перед патчем
+2. После изменения env в docker-compose → **`docker compose up -d --force-recreate`**
+3. Heredoc с JS/JSON — **ненадёжен**, использовать Python или файл→docker cp→node
+4. 🟢 веб: `jq` ❌ → `python3 -m json.tool`
+5. 🔴 GPU: `jq` ✅ (v1.6)
+6. Файлы >50 строк с русским текстом → Claude → скачать → SFTP (не cat/heredoc)
+7. GPU shelve — координация между транскрибацией и pdfocr (nvidia-smi check)
+8. Caddy контейнер: **transcribe_caddy** (не `caddy`)
+9. Alpine контейнеры: **sh**, не bash
