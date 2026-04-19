@@ -66,6 +66,17 @@ function log(msg) {
 }
 
 
+function setProgressMsg(jobId, msg, progress) {
+  try {
+    if (progress !== undefined) {
+      db.prepare("UPDATE jobs SET progress_msg=?, progress=? WHERE id=?").run(msg, progress, jobId);
+    } else {
+      db.prepare("UPDATE jobs SET progress_msg=? WHERE id=?").run(msg, jobId);
+    }
+  } catch(_) {}
+}
+
+
 // ═══════════════════════════════════════════════════
 // GPU Management (OpenStack) — переиспользуем из admin.js
 // ═══════════════════════════════════════════════════
@@ -258,11 +269,13 @@ async function startJob(job) {
   db.prepare("UPDATE jobs SET status='processing', progress=0 WHERE id=?").run(job.id);
   logEvent('job.processing', job.id, job.user_id, { stage: 'gpu_pipeline' }, 'pipeline');
   log(`Starting: ${job.id} (${job.original_name})`);
+  setProgressMsg(job.id, 'Подготовка GPU...', 0);
 
   try {
     // 1. GPU
     await ensureGpuActive();
     if (!currentSessionId) gpuSessionStart();
+    setProgressMsg(job.id, 'Проверка сервисов GPU...', 5);
 
     // 2. Services
     await checkGpuServices();
@@ -274,6 +287,7 @@ async function startJob(job) {
     }
     const remotePath = `${GPU_WORK_DIR}/${job.filename}`;
     await sshExec(`mkdir -p ${GPU_WORK_DIR}`, 10000);
+    setProgressMsg(job.id, 'Загрузка файла на GPU...', 10);
     log(`SCP → GPU: ${job.filename}`);
     await scpTo(localPath, remotePath);
 
@@ -302,6 +316,7 @@ async function startJob(job) {
 
     await sshExec(wrapperCmd, 15000);
     log(`GPU wrapper launched for ${job.id}`);
+    setProgressMsg(job.id, job.diarize ? 'Диаризация...' : 'Транскрипция...', 15);
     logEvent('job.gpu_launched', job.id, job.user_id, {}, 'pipeline');
 
     // 5a. Launch timeout — если started не придёт за 5 мин
@@ -341,7 +356,7 @@ async function handleCallback(jobId, payload) {
       break;
 
     case 'progress':
-      db.prepare("UPDATE jobs SET progress=? WHERE id=?").run(payload.progress || 0, jobId);
+      db.prepare("UPDATE jobs SET progress=?, progress_msg=? WHERE id=?").run(payload.progress || 0, payload.message || 'Обработка...', jobId);
       break;
 
     case 'done':
@@ -395,6 +410,7 @@ async function handleDone(jobId, payload) {
     try { meta = JSON.parse(metaRaw); } catch (_) {}
 
     // 3. Claude summary
+    setProgressMsg(jobId, 'Генерация саммари...', 85);
     log(`Claude summary: ${jobId} (${resultClean.length} chars)`);
     const summary = await generateSummary(resultClean, job.prompt_text);
     const timestamp = new Date().toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' });
@@ -409,6 +425,7 @@ async function handleDone(jobId, payload) {
       WHERE id=?
     `).run(resultTxt, resultSrt, resultJson, resultClean, meta.duration_sec || null, jobId);
 
+    setProgressMsg(jobId, 'Готово', 100);
     logEvent('job.completed', jobId, job.user_id, {
       original_name: job.original_name,
       duration_sec: meta.duration_sec,

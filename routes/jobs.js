@@ -131,7 +131,7 @@ async function processJob(jobId, filename, filePath) {
 // ===== LIST / GET =====
 router.get('/', authMiddleware, (req, res) => {
   const jobs = db.prepare(`
-    SELECT id, original_name, status, progress, keep_days, created_at, completed_at, expires_at,
+    SELECT id, original_name, status, progress, progress_msg, keep_days, created_at, completed_at, expires_at,
     rating, prompt_id, diarize,
     CASE WHEN result_txt IS NOT NULL THEN 1 ELSE 0 END as has_result
     FROM jobs WHERE user_id = ? AND status != 'archived' ORDER BY created_at DESC

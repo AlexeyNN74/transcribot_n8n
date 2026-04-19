@@ -1788,6 +1788,7 @@ async function loadJobs() {
       return;
     }
 
+    hasProcessingJobs = jobs.some(j => ['queued','processing'].includes(j.status));
     const formats = ['txt','srt','json','md','docx'];
 
     container.innerHTML = `
@@ -1815,7 +1816,7 @@ async function loadJobs() {
               return `
               <tr onclick="toggleRowClick(event, '${job.id}')">
                 <td onclick="event.stopPropagation()"><input type="checkbox" class="job-checkbox job-row-cb" data-job-id="${job.id}" onchange="toggleJobCheck(this,'${job.id}')"></td>
-                <td><div class="job-name" title="${job.original_name}">${job.diarize ? '<span title="Диаризация" style="margin-right:4px">👥</span>' : '<span title="Без диаризации" style="margin-right:4px;opacity:0.3">👤</span>'} ${job.original_name}</div></td>
+                <td><div class="job-name" title="${job.original_name}">${job.diarize ? '<span title="Диаризация" style="margin-right:4px">👥</span>' : '<span title="Без диаризации" style="margin-right:4px;opacity:0.3">👤</span>'} ${job.original_name}</div>${job.progress_msg && job.status !== 'completed' ? '<div style="font-size:12px;color:var(--text2);margin-top:2px">' + job.progress_msg + (job.progress > 0 && job.progress < 100 ? ' (' + job.progress + '%)' : '') + '</div>' : ''}</td>
                 <td><span class="badge badge-${job.status}">${statusLabel(job.status)}</span></td>
                 <td><div class="job-date">${formatDate(job.created_at)}</div></td>
                 <td><div class="job-date">${formatDate(job.completed_at)}</div></td>
@@ -1867,7 +1868,7 @@ function startJobsRefresh() {
     if (document.getElementById('tab-jobs').classList.contains('active')) {
       loadJobs();
     }
-  }, 15000);
+  }, hasProcessingJobs ? 5000 : 15000);
 }
 
 function stopJobsRefresh() {
