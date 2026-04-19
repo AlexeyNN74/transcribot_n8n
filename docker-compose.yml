@@ -4,6 +4,7 @@ services:
     container_name: transcribe_app
     restart: unless-stopped
     environment:
+      - TZ=Europe/Moscow
       - NODE_ENV=production
       - PORT=3000
       - DB_PATH=/data/db/transcribe.db
@@ -24,12 +25,16 @@ services:
       - OPENSTACK_PASSWORD=Cng$$Ut2ZNCqgq!nNA
       - OPENSTACK_PROJECT=AlekseyNechaev
       - GPU_SERVER_ID=8baf5a78-ef09-49c9-8aec-ccccf0a46742
+      - ANTHROPIC_API_KEY=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
+      - TRANSCRIBE_CALLBACK_SECRET=transcribe_cb_2026
       - N8N_URL=http://n8n:5678
     volumes:
       - /opt/transcribe/data:/data
       - /opt/transcribe/app/public:/app/public
       - /opt/transcribe/app:/app
       - /app/node_modules
+      - /root/.ssh/id_ed25519:/root/.ssh/id_ed25519:ro
+      - /root/.ssh/known_hosts:/root/.ssh/known_hosts:ro
     networks:
       - transcribe_net
   caddy:
@@ -43,6 +48,7 @@ services:
       - /opt/transcribe/caddy/Caddyfile:/etc/caddy/Caddyfile
       - /opt/transcribe/caddy/data:/data
       - /opt/transcribe/caddy/config:/config
+      - /opt/hub:/opt/hub:ro
     networks:
       - transcribe_net
 networks:
