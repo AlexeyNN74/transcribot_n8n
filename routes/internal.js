@@ -1,6 +1,6 @@
 'use strict';
-// Version: 1.9.8
-// Updated: 2026-04-11
+// Version: 1.9.12
+// Updated: 2026-04-19 — добавлен callback endpoint для gpu-pipeline
 
 const fs = require('fs');
 const path = require('path');
@@ -126,6 +126,36 @@ router.post('/watchdog-event', (req, res) => {
   }
 
   res.json({ ok: true });
+});
+
+
+// ═══════════════════════════════════════════════════
+// CALLBACK FROM GPU WRAPPER (callback pipeline v1.9.12)
+// ═══════════════════════════════════════════════════
+router.post('/callback/transcribe/:jobId', async (req, res) => {
+  // Ленивый require чтобы избежать circular dependency
+  const pipeline = require('../utils/gpu-pipeline');
+
+  const secret = req.headers['x-callback-secret'];
+  if (secret !== pipeline.getCallbackSecret()) {
+    return res.status(401).json({ error: 'Invalid callback secret' });
+  }
+
+  const jobId = req.params.jobId;
+  const payload = req.body;
+
+  if (!payload || !payload.type) {
+    return res.status(400).json({ error: 'Missing type in callback' });
+  }
+
+  // Отвечаем сразу, обработка асинхронная
+  res.json({ ok: true });
+
+  try {
+    await pipeline.handleCallback(jobId, payload);
+  } catch (e) {
+    console.error(`[callback] Error handling ${payload.type} for ${jobId}: ${e.message}`);
+  }
 });
 
 

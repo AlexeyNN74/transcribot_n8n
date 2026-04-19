@@ -12,6 +12,17 @@ const { UPLOAD_PATH, RESULTS_PATH } = require('../config');
 
 const router = express.Router();
 
+// ===== GPU PIPELINE (callback-архитектура v1.9.12) =====
+let pipeline = null;
+function getPipeline() {
+  if (!pipeline) {
+    pipeline = require('../utils/gpu-pipeline');
+    pipeline.recoverOnStartup();
+  }
+  return pipeline;
+}
+setTimeout(() => { try { getPipeline(); } catch (_) {} }, 5000);
+
 // ===== MULTER =====
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, UPLOAD_PATH),
@@ -103,12 +114,17 @@ router.post('/upload', authMiddleware, upload.single('file'), async (req, res) =
   res.json({ jobId, message: 'Файл загружен и поставлен в очередь' });
 });
 
+// ═══════════════════════════════════════════════════
+// processJob — GPU pipeline (callback-архитектура v1.9.12)
+// Заменяет n8n + cron + task_runner.py
+// ═══════════════════════════════════════════════════
 async function processJob(jobId, filename, filePath) {
-  db.prepare('UPDATE jobs SET status = ? WHERE id = ?').run('processing', jobId);
   try {
-    console.log(`Job ${jobId}: file ${filename} ready for processing`);
+    getPipeline().enqueueJob(jobId);
+    console.log(`[jobs] ${jobId}: enqueued for GPU pipeline`);
   } catch (e) {
-    db.prepare('UPDATE jobs SET status = ?, error = ? WHERE id = ?').run('error', e.message, jobId);
+    console.error(`[jobs] Pipeline error for ${jobId}: ${e.message}`);
+    db.prepare("UPDATE jobs SET status='error', error=? WHERE id=?").run(e.message, jobId);
   }
 }
 
@@ -310,8 +326,16 @@ router.put('/:id/reprocess', authMiddleware, (req, res) => {
     return res.status(400).json({ error: 'Аудиофайл не найден на сервере. Переобработка невозможна.' });
   }
 
-  db.prepare("UPDATE jobs SET status='pending', error=NULL, completed_at=NULL, result_txt=NULL, result_srt=NULL, result_json=NULL, result_clean=NULL WHERE id=?").run(req.params.id);
+  db.prepare("UPDATE jobs SET status='queued', error=NULL, progress=0, completed_at=NULL, result_txt=NULL, result_srt=NULL, result_json=NULL, result_clean=NULL WHERE id=?").run(req.params.id);
   logEvent('job.reprocess', req.params.id, req.user.id, { original_name: job.original_name });
+
+  // Подать в pipeline
+  try {
+    getPipeline().enqueueJob(req.params.id);
+  } catch (e) {
+    console.error(`[reprocess] Pipeline error: ${e.message}`);
+  }
+
   res.json({ ok: true, message: 'Задание поставлено на переобработку' });
 });
 
