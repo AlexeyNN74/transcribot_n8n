@@ -14,6 +14,26 @@ const { JWT_SECRET, APP_URL, ADMIN_EMAIL } = require('../config');
 
 const router = express.Router();
 
+// === MelkiAuth: poluchit tekushchego polzovatelja iz headers ===
+router.get('/me', (req, res) => {
+  const username = req.headers['x-authentik-username'] || req.headers['remote-user'];
+  const email = req.headers['x-authentik-email'] || req.headers['remote-email'] || '';
+  const groupsRaw = req.headers['x-authentik-groups'] || req.headers['remote-groups'] || '';
+  const groups = groupsRaw.split(',').filter(Boolean);
+
+  if (!username) {
+    return res.status(401).json({ error: 'Not authenticated' });
+  }
+
+  // Najti ili sozdat polzovatelja
+  const { getOrCreateUser } = require('../middleware');
+  const user = getOrCreateUser(username, email, groups);
+
+  res.json({ user: { id: user.id, email: user.email, name: user.name, role: user.role } });
+});
+
+
+
 router.post('/register', async (req, res) => {
   const { email, password, name } = req.body;
   if (!email || !password || !name) return res.status(400).json({ error: 'Заполните все поля' });

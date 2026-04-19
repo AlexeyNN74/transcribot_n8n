@@ -815,7 +815,7 @@
       <div class="nav-logo">⚡ ТРАНСКРИБАЦИЯ</div>
       <div class="nav-actions">
         <span id="nav-user-name" style="font-size:14px;color:var(--text2)"></span>
-        <button class="btn btn-outline btn-sm" onclick="doLogout()">Выйти</button>
+        <button class="btn btn-outline btn-sm" onclick="doLogout()">В Хаб</button>
       </div>
     </nav>
 
@@ -1488,74 +1488,29 @@ function showAlert(id, type, msg) {
 
 // ===== AUTH =====
 async function doLogin() {
-  const email = document.getElementById('login-email').value;
-  const password = document.getElementById('login-password').value;
-  if (!email || !password) return showAlert('login-alert', 'error', 'Заполните все поля');
-
-  const btn = document.getElementById('login-btn');
-  btn.disabled = true;
-  btn.innerHTML = '<span class="spinner"></span>';
-
-  try {
-    const data = await api('POST', '/api/auth/login', { email, password });
-    localStorage.setItem('token', data.token);
-    currentUser = data.user;
-    showPage('dashboard');
-    showTab('upload');
-  } catch (e) {
-    showAlert('login-alert', 'error', e.message);
-  } finally {
-    btn.disabled = false;
-    btn.innerHTML = 'Войти';
-  }
+  window.location.href = 'https://auth.melki.top/login?rd=https://transcribe.melki.top';
 }
 
 async function doRegister() {
-  const name = document.getElementById('reg-name').value;
-  const email = document.getElementById('reg-email').value;
-  const password = document.getElementById('reg-password').value;
-
-  if (!name || !email || !password) return showAlert('register-alert', 'error', 'Заполните все поля');
-
-  const btn = document.getElementById('register-btn');
-  btn.disabled = true;
-  btn.innerHTML = '<span class="spinner"></span>';
-
-  try {
-    const data = await api('POST', '/api/auth/register', { name, email, password });
-    showAlert('register-alert', 'success', data.message);
-    setTimeout(() => showPage('login'), 3000);
-  } catch (e) {
-    showAlert('register-alert', 'error', e.message);
-  } finally {
-    btn.disabled = false;
-    btn.innerHTML = 'Зарегистрироваться';
-  }
+  window.location.href = 'https://auth.melki.top/login?rd=https://transcribe.melki.top';
 }
 
 function doLogout() {
-  localStorage.removeItem('token');
-  currentUser = null;
-  stopJobsRefresh();
-  showPage('landing');
+  window.location.href = 'https://hub.melki.top';
 }
 
 async function checkAuth() {
-  const token = localStorage.getItem('token');
-  if (!token) return showPage('landing');
-
   try {
-    // Decode token to get user info
-    const raw = atob(token.split('.')[1].replace(/-/g,'+').replace(/_/g,'/')); const payload = JSON.parse(decodeURIComponent(raw.split('').map(c=>'%'+c.charCodeAt(0).toString(16).padStart(2,'0')).join('')));
-    if (payload.exp * 1000 < Date.now()) {
-      localStorage.removeItem('token');
-      return showPage('landing');
-    }
-    currentUser = { id: payload.id, email: payload.email, name: payload.name, role: payload.role };
+    const resp = await fetch('/api/auth/me');
+    if (!resp.ok) throw new Error('Not authenticated');
+    const data = await resp.json();
+    currentUser = data.user;
     showPage('dashboard');
     showTab('upload');
   } catch {
-    showPage('landing');
+    // Caddy forward_auth dolzhen byl perenapravit na login
+    // Esli my zdes — znachit chto-to ne tak
+    window.location.href = 'https://auth.melki.top/login?rd=' + encodeURIComponent(window.location.href);
   }
 }
 

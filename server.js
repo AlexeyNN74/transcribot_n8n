@@ -1,4 +1,11 @@
 // Студия Транскрибации — server.js (модульный)
+process.on('uncaughtException', (err) => {
+  console.error('[FATAL] Uncaught exception:', err.message);
+  console.error(err.stack);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[FATAL] Unhandled rejection:', reason);
+});
 'use strict';
 // Version: 1.9.8
 // Updated: 2026-04-15
@@ -19,6 +26,13 @@ const { PORT, UPLOAD_PATH, RESULTS_PATH, APP_URL, ADMIN_EMAIL } = require('./con
 const app = express();
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+app.use((err, req, res, next) => {
+  if (err.type === 'entity.parse.failed') {
+    console.error('[body-parser] Invalid JSON from', req.ip, req.path);
+    return res.status(400).json({ error: 'Invalid JSON' });
+  }
+  next(err);
+});
 app.set('trust proxy', 1);
 app.use(express.static(path.join(__dirname, 'public')));
 
