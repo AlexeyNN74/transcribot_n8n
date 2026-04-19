@@ -46,7 +46,8 @@ const SSH_OPTS = `-i ${GPU_SSH_KEY} -o StrictHostKeyChecking=no -o ConnectTimeou
 const GPU_UNSHELVE_TIMEOUT = 240000;   // 4 мин ожидание unshelve
 const GPU_SERVICES_TIMEOUT = 120000;   // 2 мин ожидание сервисов
 const JOB_TIMEOUT          = 7200000;  // 2 часа макс на одно задание
-const SCP_TIMEOUT          = 600000;   // 10 мин на SCP
+const SCP_TIMEOUT          = 600000;
+const LAUNCH_TIMEOUT       = 300000;   // 5 мин ожидание started callback   // 10 мин на SCP
 
 // ═══════════════════════════════════════════════════
 // State
@@ -57,6 +58,7 @@ let currentJobId = null;
 let currentSessionId = null;
 let processedInSession = [];
 let jobTimeoutTimer = null;
+let launchTimeoutTimer = null;
 
 function log(msg) {
   const ts = new Date().toISOString().slice(11, 19);
@@ -302,6 +304,10 @@ async function startJob(job) {
     log(`GPU wrapper launched for ${job.id}`);
     logEvent('job.gpu_launched', job.id, job.user_id, {}, 'pipeline');
 
+    // 5a. Launch timeout — если started не придёт за 5 мин
+    if (launchTimeoutTimer) clearTimeout(launchTimeoutTimer);
+    launchTimeoutTimer = setTimeout(() => handleLaunchTimeout(job.id), LAUNCH_TIMEOUT);
+
     // 5. Fallback timeout
     if (jobTimeoutTimer) clearTimeout(jobTimeoutTimer);
     jobTimeoutTimer = setTimeout(() => handleTimeout(job.id), JOB_TIMEOUT);
@@ -330,6 +336,7 @@ async function handleCallback(jobId, payload) {
   switch (type) {
     case 'started':
       log(`Callback started: ${jobId} (pid=${payload.pid})`);
+      if (launchTimeoutTimer) { clearTimeout(launchTimeoutTimer); launchTimeoutTimer = null; }
       db.prepare("UPDATE jobs SET status='processing' WHERE id=?").run(jobId);
       break;
 
@@ -446,6 +453,18 @@ async function handleError(jobId, payload) {
       exit_code: payload.exit_code,
       elapsed_sec: payload.elapsed_sec,
     }, 'pipeline');
+  }
+  finishJob(jobId);
+}
+
+
+function handleLaunchTimeout(jobId) {
+  log('LAUNCH TIMEOUT: ' + jobId + ' — no started callback in 5 min');
+  const job = db.prepare('SELECT * FROM jobs WHERE id=?').get(jobId);
+  if (job && job.status === 'processing') {
+    db.prepare("UPDATE jobs SET status='error', error=? WHERE id=?")
+      .run('Launch timeout: GPU wrapper не ответил за 5 мин', jobId);
+    logEvent('job.error', jobId, job.user_id, { error: 'launch_timeout' }, 'pipeline');
   }
   finishJob(jobId);
 }
