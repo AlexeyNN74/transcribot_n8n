@@ -10,7 +10,7 @@ const jwt = require('jsonwebtoken');
 const { db } = require('../db');
 const { escapeHtml, logEvent } = require('../utils/helpers');
 const { sendEmail } = require('../utils/email');
-const { JWT_SECRET, GPU_API_KEY, APP_URL, RESULTS_PATH, UPLOAD_PATH } = require('../config');
+const { JWT_SECRET, GPU_API_KEY, APP_URL, RESULTS_PATH, UPLOAD_PATH, INTERNAL_TOKEN } = require('../config');
 
 const router = express.Router();
 
@@ -195,6 +195,58 @@ router.post('/job-start', (req, res) => {
   } else {
     res.json({ ok: false, message: 'job not found' });
   }
+});
+
+
+
+// ===== EVENTS API (for admin dashboard) =====
+router.get('/events', (req, res) => {
+  const token = req.headers['x-internal-token'];
+  if (!token || token !== INTERNAL_TOKEN) {
+    return res.status(403).json({ error: 'Invalid internal token' });
+  }
+
+  const from = req.query.from || '2020-01-01';
+  const to = req.query.to || '2099-12-31';
+  const limit = Math.min(parseInt(req.query.limit) || 50, 200);
+
+  const rows = db.prepare(`
+    SELECT e.*, j.original_name, j.filename, u.name as user_name
+    FROM events e
+    LEFT JOIN jobs j ON e.job_id = j.id
+    LEFT JOIN users u ON e.user_id = u.id
+    WHERE e.timestamp >= ? AND e.timestamp <= ? || ' 23:59:59'
+    ORDER BY e.timestamp DESC
+    LIMIT ?
+  `).all(from, to, limit);
+
+  const events = rows.map(r => {
+    let message = r.event_type;
+    if (r.event_type === 'job.completed' && r.original_name)
+      message = '\u0422\u0440\u0430\u043d\u0441\u043a\u0440\u0438\u0431\u0430\u0446\u0438\u044f: ' + r.original_name;
+    else if (r.event_type === 'job.error' && r.original_name)
+      message = '\u041e\u0448\u0438\u0431\u043a\u0430: ' + r.original_name;
+    else if (r.event_type === 'gpu.unshelve')
+      message = 'GPU \u0441\u0435\u0440\u0432\u0435\u0440 \u0437\u0430\u043f\u0443\u0449\u0435\u043d';
+    else if (r.event_type === 'gpu.shelve')
+      message = 'GPU \u0441\u0435\u0440\u0432\u0435\u0440 \u043e\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d';
+    else if (r.event_type === 'service.restart')
+      message = '\u041f\u0435\u0440\u0435\u0437\u0430\u043f\u0443\u0441\u043a \u0441\u0435\u0440\u0432\u0438\u0441\u0430';
+
+    let details = null;
+    try { details = r.details ? JSON.parse(r.details) : null; } catch(_) { details = r.details; }
+
+    return {
+      service: 'transcribe',
+      type: r.event_type,
+      username: r.user_name || '',
+      message,
+      details,
+      created_at: r.timestamp,
+    };
+  });
+
+  res.json(events);
 });
 
 module.exports = router;

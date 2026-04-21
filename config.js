@@ -29,10 +29,13 @@ const N8N_URL = process.env.N8N_URL || 'http://212.67.8.251:5678';
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 });
 
+
+const INTERNAL_TOKEN = process.env.INTERNAL_TOKEN || 'melki_internal_2026';
 module.exports = {
   PORT, DB_PATH, UPLOAD_PATH, RESULTS_PATH,
   GPU_SERVER_URL, GPU_API_KEY, JWT_SECRET,
   APP_URL, ADMIN_EMAIL,
   OS_AUTH_URL, OS_GPU_ID, OS_USERNAME, OS_PASSWORD, OS_PROJECT,
-  N8N_URL
+  N8N_URL,
+  INTERNAL_TOKEN
 };
