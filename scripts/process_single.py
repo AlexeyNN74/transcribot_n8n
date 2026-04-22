@@ -37,29 +37,104 @@ CLAUDE_API_URL = "https://api.anthropic.com/v1/messages"
 CLAUDE_MODEL = "claude-haiku-4-5-20251001"
 CHUNK_SIZE = 15000
 
-CLAUDE_SYSTEM = """Ты — программа-конспектировщик аудиозаписей. Ты получаешь транскрипцию группового занятия по психологии и возвращаешь структурированный конспект.
+CLAUDE_SYSTEM = """Ты — программа-конспектировщик аудиозаписей. Перед тобой транскрипция разговорной аудиозаписи.
 
-Формат ответа:
+Формат ответа — строго по пунктам:
+1. Тема записи (2–3 предложения о содержании и жанре).
+2. Ключевые тезисы — маркированный список. Если есть метки «Голос 1», «Голос 2» — сохраняй их: «- Голос 1: …».
+3. Основные выводы и рекомендации — маркированный список. Если рекомендаций нет — опусти пункт.
+4. Интересные или спорные моменты. Если таких нет — опусти пункт.
 
-Саммари:
-[3-5 предложений — о чём запись в целом]
+Правила: без вводных фраз, без обращения «вы/вам», имена и термины — точно, язык = язык записи, plain text без markdown-заголовков.
 
-Ключевые темы:
-- [тема 1]
-- [тема 2]
+ВАЖНО: этот промпт используется ТОЛЬКО как fallback для process_single.py (ручной запуск).
+Основной pipeline — gpu-pipeline.js — берёт промпт из БД (jobs.prompt_text / prompts)."""
 
-Участники:
-- [имена и роли, если упоминаются в записи]
 
-Основные тезисы:
-- [тезис 1]
-- [тезис 2]
+# ═══════════════════════════════════════════════════
+# Whisper anti-hallucination (v1.9.14)
+# prompt + параметры декодирования + post-processing фильтр
+# ═══════════════════════════════════════════════════
 
-Правила:
-- Пиши только конспект
-- Не обращайся к собеседнику
-- Сохраняй имена и факты точно
-- Язык — русский"""
+# Нейтральный initial_prompt — уводит модель от YouTube-субтитровых паттернов,
+# не привязывая к конкретному домену (психология/лекция/интервью).
+WHISPER_PROMPT = "Это аудиозапись на русском языке. Говорящие произносят связные фразы естественной речи."
+
+import re as _re
+
+# Известные паразитные фразы, которые Whisper-large-v3 галлюцинирует
+# на длинной тишине/шуме (в основном — паттерны YouTube-субтитров).
+WHISPER_PARASITE_PATTERNS = [_re.compile(p, _re.IGNORECASE) for p in [
+    r'субтитры\s+(создавал|создал|подготовил|подготовлены|сделал|сделаны|выполнены|редактировал)',
+    r'корректор\s+субтитров',
+    r'редактор\s+субтитров',
+    r'перевод(?:ил|чик)?\s+[А-ЯA-Z][^.]{0,30}',
+    r'озвучив(?:ание|ал(?:а)?)\s+[А-ЯA-Z][^.]{0,30}',
+    r'продолжение\s+следует',
+    r'(?:спасибо|благодарим)\s+за\s+(?:просмотр|внимание)',
+    r'подписывайтесь\s+на\s+(?:наш\s+)?канал',
+    r'ставьте\s+(?:лайк|лайки|палец\s+вверх)',
+    r'ещё\s+больше\s+на\s+канале',
+    r'(?:больше|ещё)\s+видео\s+на\s+(?:канале|сайте)',
+    r'dima\s*torzok',
+    r'allsubtitles',
+    r'amara\.org',
+    r'субтитры\s+[А-ЯA-Z][^.]{0,40}\.(?:ru|com|org|net)',
+]]
+
+
+def _is_whisper_parasite(text):
+    """True, если текст — известная паразитная галлюцинация Whisper."""
+    if not text:
+        return False
+    t = text.strip().lower().rstrip('.!?…—- ')
+    if not t or len(t) < 8:
+        return False
+    for pat in WHISPER_PARASITE_PATTERNS:
+        m = pat.search(t)
+        if m and (m.end() - m.start()) >= len(t) * 0.5:
+            return True
+    return False
+
+
+def filter_whisper_parasites(segments):
+    """
+    Чистит сегменты от паразитов Whisper. Возвращает (очищенные, число_удалённых).
+    Правила:
+      1. Срезаем паразиты с хвоста (чаще всего именно там).
+      2. Срезаем паразиты с начала.
+      3. Защита от зацикливания: >=3 одинаковых коротких повторов в хвосте.
+    """
+    if not segments:
+        return segments, 0
+    result = list(segments)
+    removed = 0
+
+    while result and _is_whisper_parasite(result[-1].get('text', '')):
+        log(f"[parasite] tail: {(result[-1].get('text') or '')[:80]!r}")
+        result.pop()
+        removed += 1
+
+    while result and _is_whisper_parasite(result[0].get('text', '')):
+        log(f"[parasite] head: {(result[0].get('text') or '')[:80]!r}")
+        result.pop(0)
+        removed += 1
+
+    if len(result) >= 3:
+        last = (result[-1].get('text') or '').strip()
+        if 0 < len(last) <= 60:
+            same = 0
+            for s in reversed(result):
+                if (s.get('text') or '').strip() == last:
+                    same += 1
+                else:
+                    break
+            if same >= 3:
+                log(f"[parasite] loop x{same}: {last!r}")
+                result = result[:-same]
+                removed += same
+
+    return result, removed
 
 
 def log(msg):
@@ -181,6 +256,11 @@ def process_whisper(remote_path, result_path):
         f'-F \'response_format=verbose_json\' '
         f'-F \'language=ru\' '
         f'-F \'vad_filter=true\' '
+        f'-F \'prompt={WHISPER_PROMPT}\' '
+        f'-F \'condition_on_previous_text=false\' '
+        f'-F \'compression_ratio_threshold=2.4\' '
+        f'-F \'no_speech_threshold=0.6\' '
+        f'-F \'temperature=0.0\' '
         f'-o {result_path} '
         f'-w \'%{{http_code}}\'"',
         timeout=7200
@@ -200,6 +280,11 @@ def process_whisper(remote_path, result_path):
     os.unlink(local_result)
 
     segments = data.get("segments", [])
+
+    # Подстраховка: фильтр Whisper-паразитов (основной срабатывает на GPU-стороне)
+    segments, dropped = filter_whisper_parasites(segments)
+    if dropped:
+        log(f"[parasite] process_whisper: dropped {dropped} segments")
 
     # Конвертация в SRT (без спикеров)
     srt_lines = []
@@ -264,10 +349,15 @@ def process_diarize(remote_path, result_path, min_speakers=None, max_speakers=No
     if not segments:
         return None, "Empty segments"
 
+    # Подстраховка: фильтр Whisper-паразитов (основной — на GPU в diarize_server.py)
+    segments, dropped = filter_whisper_parasites(segments)
+    if dropped:
+        log(f"[parasite] process_diarize: dropped {dropped} segments")
+
     return {
         "result_srt": segments_to_srt(segments),
         "result_clean": segments_to_clean(segments),
-        "result_json": json.dumps(data, ensure_ascii=False),
+        "result_json": json.dumps({**data, "segments": segments}, ensure_ascii=False),
         "duration_sec": data.get("stats", {}).get("duration_sec")
     }, None
 
