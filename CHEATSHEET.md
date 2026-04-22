@@ -3,6 +3,56 @@
 
 ---
 
+## 🚫 ЗАЩИЩЁННЫЕ КОМПОНЕНТЫ — НЕ ТРОГАТЬ БЕЗ ОБСУЖДЕНИЯ
+
+**Дата фиксации: 22 апреля 2026, git tag `v1.9.14`**
+
+Эти компоненты решают конкретную проблему (Whisper-галлюцинации «Субтитры создавал DimaTorzok»).
+Любое упрощение, рефакторинг или «наведение порядка» в этих местах **СЛОМАЕТ ТРАНСКРИПЦИЮ**.
+Перед любыми правками — прочитать `git log`, открыть `git tag v1.9.14`.
+
+### 1. Whisper anti-hallucination блок
+
+Файлы:
+- 🟢 `/opt/transcribe/app/scripts/process_single.py` — функция `process_whisper` (в curl: `-F` поля `prompt`, `condition_on_previous_text`, `compression_ratio_threshold`, `no_speech_threshold`, `temperature`) и функция `filter_whisper_parasites`.
+- 🔴 `/home/ubuntu/diarize_server.py` — функция `call_whisper_api` (те же поля в multipart) и функция `filter_whisper_parasites`.
+
+Оба файла имеют блок-заголовок `⚠️  НЕ УДАЛЯТЬ И НЕ УПРОЩАТЬ  ⚠️` — ищи по нему если сомневаешься.
+
+### 2. Профиль промпта «Универсальный»
+
+- SQLite: таблица `prompts`, `id='f12fc9c3-c6a4-461e-997b-c150858ae052'`, `is_system=1`, `is_default=1`
+- Эталон текста: `/opt/transcribe/app/prompts/universal.txt` (под git)
+- Защита в коде: `if (promptCount === 0)` в `db.js:90` + `user_id !== req.user.id` в `routes/prompts.js`
+- Формат саммари: 4 секции (Тема / Тезисы / Выводы / Интересные моменты), БЕЗ префикса «Голос N:»
+
+### 3. gpu-pipeline.js подключение профилей
+
+Строка ~415: `generateSummary(resultClean, job.prompt_text)` — эта связь **уже работает**, НЕ надо «добавлять поддержку профилей» или рефакторить `generateSummary`.
+
+### 4. Восстановление если кто-то сломал
+
+```bash
+# откат кода на стабильный релиз
+cd /opt/transcribe/app
+git checkout v1.9.14 -- scripts/process_single.py
+
+# восстановить промпт «Универсальный» из эталона
+python3 - <<'EOF'
+import sqlite3
+p = open('/opt/transcribe/app/prompts/universal.txt').read().strip()
+c = sqlite3.connect('/opt/transcribe/data/db/transcribe.db')
+c.execute("UPDATE prompts SET prompt_text=? WHERE id='f12fc9c3-c6a4-461e-997b-c150858ae052'", (p,))
+c.commit()
+print('✅ промпт восстановлен из prompts/universal.txt')
+EOF
+```
+
+---
+
+
+---
+
 ## Серверы
 
 | | 🟢 Веб-сервер | 🔴 GPU-сервер |
