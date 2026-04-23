@@ -1,7 +1,4 @@
 'use strict';
-// Version: 1.9.8
-// Updated: 2026-04-11
-
 const express = require('express');
 const path = require('path');
 const fs = require('fs');
@@ -14,6 +11,17 @@ const { escapeHtml, logEvent, detectFileType, getTranscript } = require('../util
 const { UPLOAD_PATH, RESULTS_PATH } = require('../config');
 
 const router = express.Router();
+
+// ===== GPU PIPELINE (callback-архитектура v1.9.12) =====
+let pipeline = null;
+function getPipeline() {
+  if (!pipeline) {
+    pipeline = require('../utils/gpu-pipeline');
+    pipeline.recoverOnStartup();
+  }
+  return pipeline;
+}
+setTimeout(() => { try { getPipeline(); } catch (_) {} }, 5000);
 
 // ===== MULTER =====
 const storage = multer.diskStorage({
@@ -106,34 +114,33 @@ router.post('/upload', authMiddleware, upload.single('file'), async (req, res) =
   res.json({ jobId, message: 'Файл загружен и поставлен в очередь' });
 });
 
+// ═══════════════════════════════════════════════════
+// processJob — GPU pipeline (callback-архитектура v1.9.12)
+// Заменяет n8n + cron + task_runner.py
+// ═══════════════════════════════════════════════════
 async function processJob(jobId, filename, filePath) {
-  db.prepare('UPDATE jobs SET status = ? WHERE id = ?').run('processing', jobId);
   try {
-    console.log(`Job ${jobId}: file ${filename} ready for processing`);
+    getPipeline().enqueueJob(jobId);
+    console.log(`[jobs] ${jobId}: enqueued for GPU pipeline`);
   } catch (e) {
-    db.prepare('UPDATE jobs SET status = ?, error = ? WHERE id = ?').run('error', e.message, jobId);
+    console.error(`[jobs] Pipeline error for ${jobId}: ${e.message}`);
+    db.prepare("UPDATE jobs SET status='error', error=? WHERE id=?").run(e.message, jobId);
   }
 }
 
 // ===== LIST / GET =====
 router.get('/', authMiddleware, (req, res) => {
   const jobs = db.prepare(`
-    SELECT j.id, j.original_name, j.status, j.progress, j.keep_days, j.created_at, j.completed_at, j.expires_at,
-    j.rating, j.prompt_id, j.diarize, j.min_speakers, j.max_speakers, j.noise_filter,
-    CASE WHEN j.result_txt IS NOT NULL THEN 1 ELSE 0 END as has_result,
-    p.name as prompt_name
-    FROM jobs j LEFT JOIN prompts p ON j.prompt_id = p.id
-    WHERE j.user_id = ? AND j.status != 'archived' ORDER BY j.created_at DESC
+    SELECT id, original_name, status, progress, progress_msg, keep_days, created_at, completed_at, expires_at,
+    rating, prompt_id, diarize,
+    CASE WHEN result_txt IS NOT NULL THEN 1 ELSE 0 END as has_result
+    FROM jobs WHERE user_id = ? AND status != 'archived' ORDER BY created_at DESC
   `).all(req.user.id);
   res.json(jobs);
 });
 
 router.get('/:id', authMiddleware, (req, res) => {
-  const job = db.prepare(`
-    SELECT j.*, p.name as prompt_name
-    FROM jobs j LEFT JOIN prompts p ON j.prompt_id = p.id
-    WHERE j.id = ? AND j.user_id = ?
-  `).get(req.params.id, req.user.id);
+  const job = db.prepare('SELECT * FROM jobs WHERE id = ? AND user_id = ?').get(req.params.id, req.user.id);
   if (!job) return res.status(404).json({ error: 'Задание не найдено' });
   res.json(job);
 });
@@ -237,7 +244,7 @@ router.get('/:id/download/docx-clean', authMiddleware, async (req, res) => {
 
   const summary = job.result_txt ? job.result_txt.split('\n---\n')[0].trim() : '';
   let transcript = getTranscript(job);
-  transcript = transcript.replace(/^Голос \d+:?\s*\n?/gm, '').replace(/^SPEAKER_\d+:?\s*\n?/gm, '');
+  transcript = transcript.replace(/^Голос \d+:\s*/gm, '').replace(/^SPEAKER_\d+:\s*/gm, '');
 
   let content = '';
   if (summary) content += summary;
@@ -277,7 +284,7 @@ router.get('/:id/download/docx-clean', authMiddleware, async (req, res) => {
     const baseName = path.basename(job.original_name, path.extname(job.original_name));
 
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
-    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(baseName + '_clean')}.docx`);
+    res.setHeader('Content-Disposition', `attachment; filename="${baseName}_clean.docx"`);
     res.send(buffer);
   } catch (e) {
     console.error('[DOCX-CLEAN]', e.message);
@@ -303,6 +310,33 @@ router.get('/:id/download/:format', authMiddleware, (req, res) => {
   res.setHeader('Content-Disposition', `attachment; filename="${safeAscii}.${format}"; filename*=UTF-8''${encodedBase}.${format}`);
   logEvent('job.downloaded', id, req.user.id, { format }, 'web');
   res.send(content);
+});
+
+// ===== REPROCESS =====
+router.put('/:id/reprocess', authMiddleware, (req, res) => {
+  const job = db.prepare('SELECT * FROM jobs WHERE id = ? AND user_id = ?').get(req.params.id, req.user.id);
+  if (!job) return res.status(404).json({ error: 'Задание не найдено' });
+  if (!['error', 'processing'].includes(job.status)) {
+    return res.status(400).json({ error: 'Можно переобработать только задания со статусом "ошибка" или "обработка"' });
+  }
+
+  // Check that the upload file still exists
+  const filePath = path.join(UPLOAD_PATH, path.basename(job.filename));
+  if (!filePath.startsWith(UPLOAD_PATH) || !fs.existsSync(filePath)) {
+    return res.status(400).json({ error: 'Аудиофайл не найден на сервере. Переобработка невозможна.' });
+  }
+
+  db.prepare("UPDATE jobs SET status='queued', error=NULL, progress=0, completed_at=NULL, result_txt=NULL, result_srt=NULL, result_json=NULL, result_clean=NULL WHERE id=?").run(req.params.id);
+  logEvent('job.reprocess', req.params.id, req.user.id, { original_name: job.original_name });
+
+  // Подать в pipeline
+  try {
+    getPipeline().enqueueJob(req.params.id);
+  } catch (e) {
+    console.error(`[reprocess] Pipeline error: ${e.message}`);
+  }
+
+  res.json({ ok: true, message: 'Задание поставлено на переобработку' });
 });
 
 // ===== DELETE =====

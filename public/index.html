@@ -941,7 +941,9 @@
               <option value="md">MD</option>
               <option value="txt">TXT</option>
               <option value="docx">DOCX</option>
+              <option value="docx-clean">DOCX без голосов</option>
               <option value="srt">SRT</option>
+              <option value="json">JSON</option>
             </select>
           </div>
 
@@ -1768,10 +1770,6 @@ async function reprocessJob(id) {
 // ===== JOBS =====
 async function loadJobs() {
   const container = document.getElementById('jobs-container');
-  selectedJobIds.clear();
-  updateBatchBar();
-  const allCb = document.getElementById('select-all-jobs');
-  if (allCb) allCb.checked = false;
 
   try {
     const jobs = await api('GET', '/api/jobs');
@@ -1835,6 +1833,19 @@ async function loadJobs() {
           </tbody>
         </table>
       </div>`;
+
+    // Восстановить состояние чекбоксов после перерисовки
+    document.querySelectorAll('.job-row-cb').forEach(cb => {
+      if (selectedJobIds.has(cb.dataset.jobId)) {
+        cb.checked = true;
+        cb.closest('tr')?.classList.add('row-selected');
+      }
+    });
+    const allCb = document.getElementById('select-all-jobs');
+    const boxes = document.querySelectorAll('.job-row-cb');
+    if (allCb) allCb.checked = boxes.length > 0 && [...boxes].every(b => b.checked);
+    updateBatchBar();
+
   } catch (e) {
     container.innerHTML = `<div class="alert alert-error show">${e.message}</div>`;
   }
