@@ -5,3 +5,4 @@ data/uploads/
 data/results/
 *.bak-*
 *.bak.*
+*.bak_qdrant
