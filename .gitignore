@@ -6,3 +6,5 @@ data/results/
 *.bak-*
 *.bak.*
 *.bak_qdrant
+public/index.html_bak*
+*.js_bak*
