@@ -339,6 +339,30 @@ router.put('/:id/reprocess', authMiddleware, (req, res) => {
   res.json({ ok: true, message: 'Задание поставлено на переобработку' });
 });
 
+
+// ===== INDEX TO KNOWLEDGE BASE =====
+router.post('/:id/index-to-kb', authMiddleware, (req, res) => {
+  const job = db.prepare('SELECT * FROM jobs WHERE id = ? AND user_id = ?').get(req.params.id, req.user.id);
+  if (!job) return res.status(404).json({ error: 'Задание не найдено' });
+  if (job.status !== 'completed') return res.status(400).json({ error: 'Задание не завершено' });
+
+  const text = job.result_clean || job.result_txt || '';
+  if (!text.trim()) return res.status(400).json({ error: 'Нет текстового результата' });
+
+  // Чанкуем и отправляем в Qdrant
+  sendToQdrant({
+    job_id:        String(job.id),
+    text,
+    source:        'transcribe',
+    username:      req.user.name || req.user.email,
+    original_name: job.original_name,
+    created_at:    job.created_at,
+  });
+
+  logEvent('job.indexed_to_kb', req.params.id, req.user.id, { original_name: job.original_name }, 'web');
+  res.json({ ok: true });
+});
+
 // ===== DELETE =====
 router.delete('/:id', authMiddleware, (req, res) => {
   const job = db.prepare('SELECT * FROM jobs WHERE id = ? AND user_id = ?').get(req.params.id, req.user.id);
@@ -353,5 +377,57 @@ router.delete('/:id', authMiddleware, (req, res) => {
   logEvent('job.archived', req.params.id, req.user.id, { original_name: job.original_name });
   res.json({ message: 'Задание удалено' });
 });
+
+
+// ── Разбивка текста на чанки для Qdrant ─────────────────────
+function chunkText(text, chunkSize = 2000, overlap = 200) {
+  const chunks = [];
+  let start = 0;
+  const t = text.trim();
+  while (start < t.length) {
+    let end = Math.min(start + chunkSize, t.length);
+    if (end < t.length) {
+      const nlIdx  = t.lastIndexOf('\n', end);
+      const dotIdx = t.lastIndexOf('. ', end);
+      const brk    = Math.max(nlIdx, dotIdx);
+      if (brk > start + chunkSize * 0.4) end = brk + 1;
+    }
+    const chunk = t.slice(start, end).trim();
+    if (chunk.length > 50) chunks.push(chunk);
+    start = end - overlap;
+    if (start >= t.length) break;
+  }
+  return chunks;
+}
+
+function sendChunkToQdrant({ job_id, chunk, chunk_idx, total_chunks, source, username, original_name, created_at }) {
+  const body = JSON.stringify({
+    job_id: String(job_id), text: chunk, chunk_idx, total_chunks,
+    source, username: username || 'unknown',
+    original_name: original_name || '',
+    created_at: created_at || new Date().toISOString(),
+  });
+  const http = require('http');
+  const req = http.request({
+    hostname: 'n8n', port: 5678, path: '/webhook/qdrant-index', method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+    timeout: 10000,
+  }, (r) => { r.resume(); });
+  req.on('error', () => {});
+  req.write(body); req.end();
+}
+
+// Fire-and-forget: разбить текст на чанки и отправить в Qdrant
+function sendToQdrant({ job_id, text, source, username, original_name, created_at }) {
+  const chunks = chunkText(text || '');
+  if (!chunks.length) return;
+  chunks.forEach((chunk, i) => {
+    setTimeout(() => {
+      sendChunkToQdrant({ job_id, chunk, chunk_idx: i, total_chunks: chunks.length,
+                          source, username, original_name, created_at });
+    }, i * 300);
+  });
+  console.log(`[qdrant] ${source}#${job_id}: ${chunks.length} chunks queued`);
+}
 
 module.exports = router;

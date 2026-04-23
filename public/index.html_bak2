@@ -937,7 +937,6 @@
             </label>
             <span class="batch-count" id="batch-count">Выбрано: 0</span>
             <button class="btn btn-outline btn-sm" onclick="downloadSelectedZip()" id="batch-dl-btn" disabled>⬇ Скачать выбранные</button>
-            <button class="btn btn-outline btn-sm" onclick="indexSelectedToKB()" id="batch-kb-btn" disabled title="Сохранить выбранные в базу знаний">🧠 В базу</button>
             <select id="batch-format" style="background:var(--surface);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:6px;font-size:12px">
               <option value="md">MD</option>
               <option value="txt">TXT</option>
@@ -1699,10 +1698,8 @@ function updateBatchBar() {
   const bar = document.getElementById('batch-bar');
   const cnt = document.getElementById('batch-count');
   const btn = document.getElementById('batch-dl-btn');
-  const kbBtn = document.getElementById('batch-kb-btn');
   cnt.textContent = 'Выбрано: ' + selectedJobIds.size;
   btn.disabled = selectedJobIds.size === 0;
-  if (kbBtn) kbBtn.disabled = selectedJobIds.size === 0;
 }
 
 function toggleJobCheck(cb, jobId) {
@@ -2083,26 +2080,6 @@ async function downloadAndMark(jobId, format) {
 
 
 // ── Индексация в базу знаний ────────────────────────────────
-async function indexSelectedToKB() {
-  const ids = [...selectedJobIds];
-  if (!ids.length) return;
-  const btn = document.getElementById('batch-kb-btn');
-  btn.disabled = true;
-  btn.textContent = '⏳ 0/' + ids.length;
-  let done = 0, errors = 0;
-  for (const id of ids) {
-    try {
-      await api('POST', `/api/jobs/${id}/index-to-kb`);
-      done++;
-    } catch(e) {
-      errors++;
-    }
-    btn.textContent = `⏳ ${done + errors}/${ids.length}`;
-  }
-  btn.textContent = errors ? `⚠️ ${done}/${ids.length}` : `✅ ${done}`;
-  setTimeout(() => { btn.textContent = '🧠 В базу'; btn.disabled = selectedJobIds.size === 0; }, 3000);
-}
-
 async function indexToKB(jobId, btn) {
   const origText = btn ? btn.textContent : '';
   const origDisabled = btn ? btn.disabled : false;
