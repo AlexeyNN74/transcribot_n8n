@@ -104,19 +104,6 @@ router.post('/job-result', (req, res) => {
     has_srt: !!result_srt,
     has_clean: !!result_clean
   }, 'n8n');
-
-  // Индексируем в Qdrant
-  if (fullJob) {
-    sendToQdrant({
-      job_id:        fullJob.id,
-      text:          result_clean || result_txt || '',
-      source:        'transcribe',
-      username:      fullJob.name,
-      original_name: fullJob.original_name,
-      created_at:    fullJob.created_at,
-    });
-  }
-
   res.json({ ok: true });
 });
 
@@ -261,32 +248,5 @@ router.get('/events', (req, res) => {
 
   res.json(events);
 });
-
-
-// ── Qdrant indexing (fire-and-forget) ──────────────────────
-function sendToQdrant({ job_id, text, source, username, original_name, created_at }) {
-  const body = JSON.stringify({
-    job_id:        String(job_id),
-    text:          (text || '').slice(0, 8000),
-    source,
-    username:      username || 'unknown',
-    original_name: original_name || '',
-    created_at:    created_at || new Date().toISOString(),
-  });
-  const http = require('http');
-  const req = http.request({
-    hostname: 'n8n', port: 5678,
-    path: '/webhook/qdrant-index',
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Content-Length': Buffer.byteLength(body),
-    },
-    timeout: 10000,
-  }, (r) => { r.resume(); console.log(`[qdrant] ${source}#${job_id}: ${r.statusCode}`); });
-  req.on('error', (e) => console.error(`[qdrant] ${source}#${job_id}: ${e.message}`));
-  req.write(body);
-  req.end();
-}
 
 module.exports = router;

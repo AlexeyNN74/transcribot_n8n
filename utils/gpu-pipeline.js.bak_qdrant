@@ -444,7 +444,6 @@ async function handleDone(jobId, payload) {
     }
 
     log(`Job completed: ${jobId}`);
-    try { sendToQdrant({ job_id: jobId, text: resultClean || resultTxt, source: 'transcribe', username: job.name, original_name: job.original_name, created_at: job.created_at }); } catch(_e) { log('[qdrant] '+_e.message); }
 
     // 6. Cleanup
     fs.rmSync(localResultDir, { recursive: true, force: true });
@@ -650,33 +649,6 @@ function isGpuBusy() {
 // ═══════════════════════════════════════════════════
 // Exports
 // ═══════════════════════════════════════════════════
-
-
-// ── Qdrant indexing (fire-and-forget) ──────────────────────
-function sendToQdrant({ job_id, text, source, username, original_name, created_at }) {
-  const body = JSON.stringify({
-    job_id:        String(job_id),
-    text:          (text || '').slice(0, 8000),
-    source,
-    username:      username || 'unknown',
-    original_name: original_name || '',
-    created_at:    created_at || new Date().toISOString(),
-  });
-  const http = require('http');
-  const req = http.request({
-    hostname: 'n8n', port: 5678,
-    path: '/webhook/qdrant-index',
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Content-Length': Buffer.byteLength(body),
-    },
-    timeout: 10000,
-  }, (r) => { r.resume(); console.log(`[qdrant] ${source}#${job_id}: ${r.statusCode}`); });
-  req.on('error', (e) => console.error(`[qdrant] ${source}#${job_id}: ${e.message}`));
-  req.write(body);
-  req.end();
-}
 
 module.exports = {
   enqueueJob,
