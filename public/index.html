@@ -2087,12 +2087,14 @@ async function indexSelectedToKB() {
   const ids = [...selectedJobIds];
   if (!ids.length) return;
   const btn = document.getElementById('batch-kb-btn');
+  const _kbProject = prompt('В какой проект сохранить?', 'default');
+  if (_kbProject === null) { btn.disabled = false; return; }
   btn.disabled = true;
   btn.textContent = '⏳ 0/' + ids.length;
   let done = 0, errors = 0;
   for (const id of ids) {
     try {
-      await api('POST', `/api/jobs/${id}/index-to-kb`);
+      await api('POST', `/api/jobs/${id}/index-to-kb`, { project: _kbProject.trim() || 'default' });
       done++;
     } catch(e) {
       errors++;
@@ -2108,7 +2110,9 @@ async function indexToKB(jobId, btn) {
   const origDisabled = btn ? btn.disabled : false;
   if (btn) { btn.disabled = true; btn.textContent = '⏳'; }
   try {
-    const data = await api('POST', `/api/jobs/${jobId}/index-to-kb`);
+    const project = prompt('В какой проект сохранить?', 'default');
+    if (project === null) { if (btn) { btn.textContent = origText; btn.disabled = origDisabled; } return; }
+    const data = await api('POST', `/api/jobs/${jobId}/index-to-kb`, { project: project.trim() || 'default' });
     if (btn) { btn.textContent = '✅'; setTimeout(() => { btn.textContent = origText; btn.disabled = origDisabled; }, 2000); }
   } catch(e) {
     if (btn) { btn.textContent = '❌'; setTimeout(() => { btn.textContent = origText; btn.disabled = origDisabled; }, 2000); }
