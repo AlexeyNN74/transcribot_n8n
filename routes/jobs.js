@@ -349,18 +349,20 @@ router.post('/:id/index-to-kb', authMiddleware, (req, res) => {
   const text = job.result_clean || job.result_txt || '';
   if (!text.trim()) return res.status(400).json({ error: 'Нет текстового результата' });
 
-  // Чанкуем и отправляем в Qdrant
+  const project = (req.body && req.body.project || 'default').trim() || 'default';
+
   sendToQdrant({
     job_id:        String(job.id),
     text,
     source:        'transcribe',
     username:      req.user.name || req.user.email,
+    project,
     original_name: job.original_name,
     created_at:    job.created_at,
   });
 
-  logEvent('job.indexed_to_kb', req.params.id, req.user.id, { original_name: job.original_name }, 'web');
-  res.json({ ok: true });
+  logEvent('job.indexed_to_kb', req.params.id, req.user.id, { original_name: job.original_name, project }, 'web');
+  res.json({ ok: true, project });
 });
 
 // ===== DELETE =====
@@ -400,10 +402,11 @@ function chunkText(text, chunkSize = 2000, overlap = 200) {
   return chunks;
 }
 
-function sendChunkToQdrant({ job_id, chunk, chunk_idx, total_chunks, source, username, original_name, created_at }) {
+function sendChunkToQdrant({ job_id, chunk, chunk_idx, total_chunks, source, username, project, original_name, created_at }) {
   const body = JSON.stringify({
     job_id: String(job_id), text: chunk, chunk_idx, total_chunks,
     source, username: username || 'unknown',
+    project: project || 'default',
     original_name: original_name || '',
     created_at: created_at || new Date().toISOString(),
   });
@@ -418,16 +421,17 @@ function sendChunkToQdrant({ job_id, chunk, chunk_idx, total_chunks, source, use
 }
 
 // Fire-and-forget: разбить текст на чанки и отправить в Qdrant
-function sendToQdrant({ job_id, text, source, username, original_name, created_at }) {
+function sendToQdrant({ job_id, text, source, username, project, original_name, created_at }) {
   const chunks = chunkText(text || '');
   if (!chunks.length) return;
   chunks.forEach((chunk, i) => {
     setTimeout(() => {
       sendChunkToQdrant({ job_id, chunk, chunk_idx: i, total_chunks: chunks.length,
-                          source, username, original_name, created_at });
+                          source, username, project, original_name, created_at });
     }, i * 300);
   });
   console.log(`[qdrant] ${source}#${job_id}: ${chunks.length} chunks queued`);
 }
+
 
 module.exports = router;
