@@ -27,36 +27,6 @@ const { sendEmail } = require('../utils/email');
 const execAsync = promisify(exec);
 
 // ═══════════════════════════════════════════════════
-// Кэшированные prepared statements (создаются 1 раз)
-// ═══════════════════════════════════════════════════
-// Инициализируются лениво после db загрузки
-let _stmts = null;
-function stmts() {
-  if (!_stmts) {
-    _stmts = {
-      setProgress:     db.prepare("UPDATE jobs SET progress_msg=?, progress=? WHERE id=?"),
-      setProgressMsg:  db.prepare("UPDATE jobs SET progress_msg=? WHERE id=?"),
-      setProcessing:   db.prepare("UPDATE jobs SET status='processing', progress=0 WHERE id=?"),
-      setError:        db.prepare("UPDATE jobs SET status='error', error=? WHERE id=?"),
-      setCompleted:    db.prepare("UPDATE jobs SET status='completed', result_txt=?, result_srt=?, result_json=?, result_clean=?, duration_sec=?, completed_at=datetime('now'), progress=100 WHERE id=?"),
-      setProgressOnly: db.prepare("UPDATE jobs SET progress=?, progress_msg=? WHERE id=?"),
-      setStatusProc:   db.prepare("UPDATE jobs SET status='processing' WHERE id=?"),
-      getJobWithUser:  db.prepare("SELECT j.*, u.email, u.name FROM jobs j JOIN users u ON j.user_id=u.id WHERE j.id=?"),
-      getJob:          db.prepare("SELECT * FROM jobs WHERE id=?"),
-      getQueued:       db.prepare("SELECT j.*, u.email as user_email, u.name as user_name FROM jobs j JOIN users u ON j.user_id = u.id WHERE j.status='queued' ORDER BY j.created_at ASC LIMIT 1"),
-      getNextQueued:   db.prepare("SELECT id FROM jobs WHERE status='queued' ORDER BY created_at ASC LIMIT 1"),
-      countQueued:     db.prepare("SELECT COUNT(*) as cnt FROM jobs WHERE status='queued'"),
-      getStuck:        db.prepare("SELECT id FROM jobs WHERE status='processing'"),
-      recoverStuck:    db.prepare("UPDATE jobs SET status='queued', progress=0 WHERE status='processing'"),
-      insertSession:   db.prepare("INSERT INTO gpu_sessions (id, unshelve_at, trigger_type, status) VALUES (?, datetime('now'), 'auto', 'active')"),
-      closeSession:    db.prepare("UPDATE gpu_sessions SET shelve_at=datetime('now'), duration_sec=CAST((julianday(datetime('now')) - julianday(unshelve_at)) * 86400 AS REAL), jobs_count=?, job_ids=?, status='closed' WHERE id=?"),
-      setRating:       db.prepare("UPDATE jobs SET rating = ? WHERE id = ?"),
-    };
-  }
-  return _stmts;
-}
-
-// ═══════════════════════════════════════════════════
 // Конфигурация (из env)
 // ═══════════════════════════════════════════════════
 
@@ -99,9 +69,9 @@ function log(msg) {
 function setProgressMsg(jobId, msg, progress) {
   try {
     if (progress !== undefined) {
-      stmts().setProgress.run(msg, progress, jobId);
+      db.prepare("UPDATE jobs SET progress_msg=?, progress=? WHERE id=?").run(msg, progress, jobId);
     } else {
-      stmts().setProgressMsg.run(msg, jobId);
+      db.prepare("UPDATE jobs SET progress_msg=? WHERE id=?").run(msg, jobId);
     }
   } catch(_) {}
 }
@@ -210,7 +180,7 @@ async function checkGpuServices() {
 async function shelveGpu() {
   try {
     // Проверяем, нет ли ещё заданий в очереди
-    const pending = stmts().countQueued.get();
+    const pending = db.prepare("SELECT COUNT(*) as cnt FROM jobs WHERE status='queued'").get();
     if (pending.cnt > 0) {
       log(`Queue has ${pending.cnt} more jobs — GPU stays active`);
       return false;
@@ -235,7 +205,9 @@ function gpuSessionStart() {
   currentSessionId = sid;
   processedInSession = [];
   try {
-    stmts().insertSession.run(sid);
+    db.prepare(
+      "INSERT INTO gpu_sessions (id, unshelve_at, trigger_type, status) VALUES (?, datetime('now'), 'auto', 'active')"
+    ).run(sid);
     log(`GPU session: ${sid.slice(0, 8)}`);
   } catch (e) {
     log(`Session start error: ${e.message}`);
@@ -245,7 +217,13 @@ function gpuSessionStart() {
 function gpuSessionEnd() {
   if (!currentSessionId) return;
   try {
-    stmts().closeSession.run(processedInSession.length, JSON.stringify(processedInSession), currentSessionId);
+    db.prepare(`
+      UPDATE gpu_sessions SET
+        shelve_at=datetime('now'),
+        duration_sec=CAST((julianday(datetime('now')) - julianday(unshelve_at)) * 86400 AS REAL),
+        jobs_count=?, job_ids=?, status='closed'
+      WHERE id=?
+    `).run(processedInSession.length, JSON.stringify(processedInSession), currentSessionId);
     log(`GPU session closed: ${currentSessionId.slice(0, 8)}, jobs=${processedInSession.length}`);
   } catch (e) {
     log(`Session end error: ${e.message}`);
@@ -273,7 +251,11 @@ async function processQueue() {
     return;
   }
 
-  const job = stmts().getQueued.get();
+  const job = db.prepare(`
+    SELECT j.*, u.email as user_email, u.name as user_name
+    FROM jobs j JOIN users u ON j.user_id = u.id
+    WHERE j.status='queued' ORDER BY j.created_at ASC LIMIT 1
+  `).get();
 
   if (!job) return;
 
@@ -284,7 +266,7 @@ async function startJob(job) {
   gpuBusy = true;
   currentJobId = job.id;
 
-  stmts().setProcessing.run(job.id);
+  db.prepare("UPDATE jobs SET status='processing', progress=0 WHERE id=?").run(job.id);
   logEvent('job.processing', job.id, job.user_id, { stage: 'gpu_pipeline' }, 'pipeline');
   log(`Starting: ${job.id} (${job.original_name})`);
   setProgressMsg(job.id, 'Подготовка GPU...', 0);
@@ -347,7 +329,7 @@ async function startJob(job) {
 
   } catch (e) {
     log(`Launch failed: ${e.message}`);
-    stmts().setError.run(e.message, job.id);
+    db.prepare("UPDATE jobs SET status='error', error=? WHERE id=?").run(e.message, job.id);
     logEvent('job.error', job.id, job.user_id, { error: e.message, stage: 'launch' }, 'pipeline');
     gpuBusy = false;
     currentJobId = null;
@@ -370,11 +352,11 @@ async function handleCallback(jobId, payload) {
     case 'started':
       log(`Callback started: ${jobId} (pid=${payload.pid})`);
       if (launchTimeoutTimer) { clearTimeout(launchTimeoutTimer); launchTimeoutTimer = null; }
-      stmts().setStatusProc.run(jobId);
+      db.prepare("UPDATE jobs SET status='processing' WHERE id=?").run(jobId);
       break;
 
     case 'progress':
-      stmts().setProgressOnly.run(payload.progress || 0, payload.message || 'Обработка...', jobId);
+      db.prepare("UPDATE jobs SET progress=?, progress_msg=? WHERE id=?").run(payload.progress || 0, payload.message || 'Обработка...', jobId);
       break;
 
     case 'done':
@@ -396,7 +378,7 @@ async function handleCallback(jobId, payload) {
 
 
 async function handleDone(jobId, payload) {
-  const job = stmts().getJobWithUser.get(jobId);
+  const job = db.prepare('SELECT j.*, u.email, u.name FROM jobs j JOIN users u ON j.user_id=u.id WHERE j.id=?').get(jobId);
   if (!job) {
     log(`Job not found: ${jobId}`);
     finishJob(jobId);
@@ -436,7 +418,12 @@ async function handleDone(jobId, payload) {
     log(`Summary done: ${summary.length} chars`);
 
     // 4. DB update
-    stmts().setCompleted.run(resultTxt, resultSrt, resultJson, resultClean, meta.duration_sec || null, jobId);
+    db.prepare(`
+      UPDATE jobs SET
+        status='completed', result_txt=?, result_srt=?, result_json=?,
+        result_clean=?, duration_sec=?, completed_at=datetime('now'), progress=100
+      WHERE id=?
+    `).run(resultTxt, resultSrt, resultJson, resultClean, meta.duration_sec || null, jobId);
 
     setProgressMsg(jobId, 'Готово', 100);
     logEvent('job.completed', jobId, job.user_id, {
@@ -465,7 +452,8 @@ async function handleDone(jobId, payload) {
 
   } catch (e) {
     log(`handleDone error: ${e.message}`);
-    stmts().setError.run(`Post-processing: ${e.message}`, jobId);
+    db.prepare("UPDATE jobs SET status='error', error=? WHERE id=?")
+      .run(`Post-processing: ${e.message}`, jobId);
     logEvent('job.error', jobId, job.user_id, { error: e.message, stage: 'post_processing' }, 'pipeline');
   }
 
@@ -474,9 +462,10 @@ async function handleDone(jobId, payload) {
 
 
 async function handleError(jobId, payload) {
-  const job = stmts().getJob.get(jobId);
+  const job = db.prepare('SELECT * FROM jobs WHERE id=?').get(jobId);
   if (job) {
-    stmts().setError.run(payload.message || 'GPU processing error', jobId);
+    db.prepare("UPDATE jobs SET status='error', error=? WHERE id=?")
+      .run(payload.message || 'GPU processing error', jobId);
     logEvent('job.error', jobId, job.user_id, {
       error: payload.message,
       exit_code: payload.exit_code,
@@ -489,9 +478,10 @@ async function handleError(jobId, payload) {
 
 function handleLaunchTimeout(jobId) {
   log('LAUNCH TIMEOUT: ' + jobId + ' — no started callback in 5 min');
-  const job = stmts().getJob.get(jobId);
+  const job = db.prepare('SELECT * FROM jobs WHERE id=?').get(jobId);
   if (job && job.status === 'processing') {
-    stmts().setError.run('Launch timeout: GPU wrapper не ответил за 5 мин', jobId);
+    db.prepare("UPDATE jobs SET status='error', error=? WHERE id=?")
+      .run('Launch timeout: GPU wrapper не ответил за 5 мин', jobId);
     logEvent('job.error', jobId, job.user_id, { error: 'launch_timeout' }, 'pipeline');
   }
   finishJob(jobId);
@@ -500,9 +490,10 @@ function handleLaunchTimeout(jobId) {
 
 function handleTimeout(jobId) {
   log(`TIMEOUT: ${jobId} — no callback in ${JOB_TIMEOUT / 60000} min`);
-  const job = stmts().getJob.get(jobId);
+  const job = db.prepare('SELECT * FROM jobs WHERE id=?').get(jobId);
   if (job && job.status === 'processing') {
-    stmts().setError.run('Timeout: GPU не ответил', jobId);
+    db.prepare("UPDATE jobs SET status='error', error=? WHERE id=?")
+      .run('Timeout: GPU не ответил', jobId);
     logEvent('job.error', jobId, job.user_id, { error: 'timeout' }, 'pipeline');
   }
   finishJob(jobId);
@@ -515,7 +506,7 @@ async function finishJob(jobId) {
   currentJobId = null;
 
   // Следующее задание в очереди?
-  const next = stmts().getNextQueued.get();
+  const next = db.prepare("SELECT id FROM jobs WHERE status='queued' ORDER BY created_at ASC LIMIT 1").get();
   if (next) {
     log(`Next in queue: ${next.id}`);
     setTimeout(processQueue, 2000);
@@ -630,10 +621,10 @@ async function generateSummary(cleanText, promptText) {
 function recoverOnStartup() {
   // Задания в processing → вернуть в queued
   // (gpu_wrapper на GPU может быть ещё жив — но лучше переподать)
-  const stuck = stmts().getStuck.all();
+  const stuck = db.prepare("SELECT id FROM jobs WHERE status='processing'").all();
   if (stuck.length > 0) {
     log(`Recovery: ${stuck.length} stuck jobs → queued`);
-    stmts().recoverStuck.run();
+    db.prepare("UPDATE jobs SET status='queued', progress=0 WHERE status='processing'").run();
     setTimeout(processQueue, 10000);
   }
 }
