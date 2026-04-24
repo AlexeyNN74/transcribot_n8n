@@ -286,6 +286,18 @@
     min-height: calc(100vh - 61px);
   }
 
+
+  .sidebar-nav li { position: relative; }
+  .proj-del { display: none; position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+    width: 16px; height: 16px; border-radius: 50%; background: var(--error); color: #fff;
+    font-size: 9px; font-weight: 900; cursor: pointer; align-items: center; justify-content: center;
+    line-height: 1; border: none; padding: 0; }
+  .proj-delete-mode #proj-nav-list li:hover .proj-del { display: flex; }
+  .proj-notif { font-size: 11px; padding: 4px 8px; border-radius: 4px; margin-bottom: 4px;
+    display: flex; justify-content: space-between; align-items: center; }
+  .proj-notif-warn { background: rgba(251,191,36,.15); color: var(--warn); }
+  .proj-notif-danger { background: rgba(248,113,113,.15); color: var(--error); }
+  .proj-notif-deleted { background: rgba(136,136,136,.1); color: var(--text2); text-decoration: line-through; }
   .sidebar {
     background: var(--surface);
     border-right: 1px solid var(--border);
@@ -836,6 +848,7 @@
         </ul>
         <div style="margin-top:20px;padding-top:16px;border-top:1px solid var(--border)">
           <div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--text2);margin-bottom:8px;padding:0 8px">Проекты</div>
+          <div id="proj-notifications" style="margin-bottom:6px"></div>
           <ul class="sidebar-nav" id="proj-nav-list">
             <li><a class="active" onclick="setActiveProject(null)">Все задания</a></li>
           </ul>
@@ -1782,7 +1795,7 @@ async function loadJobs() {
   const container = document.getElementById('jobs-container');
 
   try {
-    const jobs = await api('GET', '/api/jobs');
+    const jobs = await api('GET', '/api/jobs' + (typeof activeProject !== 'undefined' && activeProject ? '?project=' + encodeURIComponent(activeProject) : ''));
 
     // Show/hide batch bar
     document.getElementById('batch-bar').style.display = jobs.length > 0 ? 'flex' : 'none';
@@ -2153,14 +2166,30 @@ let activeProject = (function() {
 async function loadProjects() {
   try {
     const cached = JSON.parse(localStorage.getItem('kb_projects') || '[]');
-    const r = await api('GET', '/api/jobs/projects');
-    const api_projects = r.projects || [];
-    const all = [...new Set([...api_projects, ...cached])].filter(p => p && p !== 'default').sort();
+    const d = await api('GET', '/api/jobs/projects');
+    const apiP = d.projects || [];
+    const all = [...new Set([...apiP, ...cached])].filter(p => p && p !== 'default').sort();
     const list = document.getElementById('proj-nav-list');
     if (!list) return;
     list.innerHTML = '<li><a class="' + (!activeProject ? 'active' : '') + '" onclick="setActiveProject(null)">Все задания</a></li>'
-      + all.map(p => '<li><a class="' + (activeProject===p ? 'active' : '') + '" onclick="setActiveProject(\'' + p.replace(/'/g,"\\'") + '\')">' + p + '</a></li>').join('');
-  } catch(e) {}
+      + all.map(p => '<li><a class="' + (activeProject===p?'active':'') + '" onclick="setActiveProject('' + p.replace(/'/g,"\'") + '')">'
+        + p + '</a>'
+        + '<button class="proj-del" onclick="event.stopPropagation();showProjectModal('' + p.replace(/'/g,"\'") + '')" title="Управление проектом">✕</button>'
+        + '</li>').join('');
+    const notifEl = document.getElementById('proj-notifications');
+    if (notifEl) {
+      let html = '';
+      for (const n of (d.notifications||[])) {
+        const cls = n.days_left <= 1 ? 'proj-notif proj-notif-danger' : 'proj-notif proj-notif-warn';
+        const txt = n.days_left <= 0 ? 'удалится сегодня' : 'через ' + n.days_left + ' ' + (n.days_left===1?'день':n.days_left<5?'дня':'дней');
+        html += '<div class="' + cls + '"><span>📁 ' + n.project + '</span><span>' + txt + '</span></div>';
+      }
+      for (const p of (d.deleted_today||[])) {
+        html += '<div class="proj-notif proj-notif-deleted">📁 ' + p + '</div>';
+      }
+      notifEl.innerHTML = html;
+    }
+  } catch(e) { console.error('loadProjects:', e); }
 }
 
 function setActiveProject(p) {

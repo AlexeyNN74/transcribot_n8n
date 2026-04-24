@@ -133,24 +133,64 @@ async function processJob(jobId, filename, filePath) {
 
 // ===== LIST / GET =====
 router.get('/', authMiddleware, async (req, res) => {
+  const project = req.query.project || null;
+  const params = [req.user.id];
+  let pf = '';
+  if (project) { pf = ' AND project = ?'; params.push(project); }
   const jobs = await dbAll(`
     SELECT id, original_name, status, progress, progress_msg, keep_days, created_at, completed_at,
-           expires_at, rating, prompt_id, diarize,
+           expires_at, rating, prompt_id, diarize, project,
            CASE WHEN result_txt IS NOT NULL THEN 1 ELSE 0 END as has_result
-    FROM transcribe_jobs WHERE user_id = ? AND status != 'archived' ORDER BY created_at DESC
-  `, [req.user.id]);
+    FROM transcribe_jobs WHERE user_id = ? AND status != 'archived'${pf} ORDER BY created_at DESC
+  `, params);
   res.json(jobs);
 });
 
+
+
+// ── Delete project from Qdrant ───────────────────────────────
+function deleteProjectFromQdrant(username, projectName) {
+  return new Promise((resolve, reject) => {
+    const body = JSON.stringify({
+      filter: { must: [
+        { key: 'username', match: { value: username } },
+        { key: 'project',  match: { value: projectName } }
+      ]}
+    });
+    const http = require('http');
+    const req2 = http.request({
+      hostname: 'qdrant', port: 6333,
+      path: '/collections/melki_knowledge/points/delete',
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }
+    }, (r) => { let d = ''; r.on('data', c => d += c); r.on('end', () => resolve(d)); });
+    req2.on('error', resolve); // fire-and-forget
+    req2.write(body); req2.end();
+  });
+}
 
 // ===== PROJECTS (from Qdrant) =====
 router.get('/projects', authMiddleware, async (req, res) => {
   try {
     const username = req.user.name || req.user.email;
+    // Cleanup expired archives
+    const expired = await dbAll(
+      "SELECT project_name FROM archived_projects WHERE username=? AND delete_at<=NOW() AND deleted_at IS NULL",
+      [username]);
+    for (const row of expired) {
+      await deleteProjectFromQdrant(username, row.project_name);
+      await dbRun("UPDATE archived_projects SET deleted_at=NOW() WHERE username=? AND project_name=? AND deleted_at IS NULL", [username, row.project_name]);
+    }
+    const archivedRows = await dbAll(
+      "SELECT project_name, delete_at FROM archived_projects WHERE username=? AND deleted_at IS NULL ORDER BY delete_at",
+      [username]);
+    const archivedNames = archivedRows.map(r => r.project_name);
+    const deletedToday = await dbAll(
+      "SELECT project_name FROM archived_projects WHERE username=? AND deleted_at >= NOW()-INTERVAL '24 hours'",
+      [username]);
     const body = JSON.stringify({
       filter: { must: [{ key: 'username', match: { value: username } }] },
-      with_payload: ['project'],
-      limit: 1000
+      with_payload: ['project'], limit: 1000
     });
     const http = require('http');
     const data = await new Promise((resolve, reject) => {
@@ -160,21 +200,48 @@ router.get('/projects', authMiddleware, async (req, res) => {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }
       }, (r) => {
-        let d = '';
-        r.on('data', c => d += c);
+        let d = ''; r.on('data', c => d += c);
         r.on('end', () => { try { resolve(JSON.parse(d)); } catch(e) { reject(e); } });
       });
-      req2.on('error', reject);
-      req2.write(body);
-      req2.end();
+      req2.on('error', reject); req2.write(body); req2.end();
     });
     const pts = data.result?.points || [];
-    const projects = [...new Set(pts.map(p => p.payload?.project).filter(Boolean))].sort();
-    res.json({ projects: projects.length ? projects : ['default'] });
+    const all = [...new Set(pts.map(p => p.payload?.project).filter(Boolean))].sort();
+    const projects = all.filter(p => !archivedNames.includes(p));
+    const now = Date.now();
+    const notifications = archivedRows
+      .map(r => ({ project: r.project_name, days_left: Math.ceil((new Date(r.delete_at)-now)/86400000) }))
+      .filter(n => n.days_left <= 3);
+    res.json({
+      projects: projects.length ? projects : ['default'],
+      notifications,
+      deleted_today: deletedToday.map(r => r.project_name)
+    });
   } catch (e) {
     console.error('[projects]', e.message);
-    res.json({ projects: ['default'] });
+    res.json({ projects: ['default'], notifications: [], deleted_today: [] });
   }
+});
+
+router.delete('/projects/:name', authMiddleware, async (req, res) => {
+  try {
+    const username = req.user.name || req.user.email;
+    await deleteProjectFromQdrant(username, req.params.name);
+    await dbRun("DELETE FROM archived_projects WHERE username=? AND project_name=?", [username, req.params.name]);
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post('/projects/:name/archive', authMiddleware, async (req, res) => {
+  try {
+    const username = req.user.name || req.user.email;
+    const days = Math.min(Math.max(parseInt(req.body?.days)||14,1),90);
+    const deleteAt = new Date(Date.now() + days*86400000).toISOString();
+    await dbRun(
+      "INSERT INTO archived_projects (username,project_name,delete_at) VALUES (?,?,?)",
+      [username, req.params.name, deleteAt]);
+    res.json({ ok: true, days });
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 router.get('/:id', authMiddleware, async (req, res) => {
@@ -335,6 +402,7 @@ router.post('/:id/index-to-kb', authMiddleware, async (req, res) => {
     original_name: job.original_name,
     created_at:    job.created_at,
   });
+  await dbRun('UPDATE transcribe_jobs SET project = ? WHERE id = ?', [project, req.params.id]);
 
   logEvent('job.indexed_to_kb', req.params.id, req.user.id, { original_name: job.original_name, project }, 'web');
   res.json({ ok: true, project });
