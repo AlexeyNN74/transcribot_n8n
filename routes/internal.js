@@ -1,13 +1,13 @@
 'use strict';
-// Version: 1.9.12
-// Updated: 2026-04-19 — добавлен callback endpoint для gpu-pipeline
+// routes/internal.js v2.0 — PostgreSQL edition
+// Updated: 2026-04-24
 
 const fs = require('fs');
 const path = require('path');
 const express = require('express');
 const jwt = require('jsonwebtoken');
 
-const { db } = require('../db');
+const { dbGet, dbAll, dbRun } = require('../db');
 const { escapeHtml, logEvent } = require('../utils/helpers');
 const { sendEmail } = require('../utils/email');
 const { JWT_SECRET, GPU_API_KEY, APP_URL, RESULTS_PATH, UPLOAD_PATH, INTERNAL_TOKEN } = require('../config');
@@ -15,7 +15,7 @@ const { JWT_SECRET, GPU_API_KEY, APP_URL, RESULTS_PATH, UPLOAD_PATH, INTERNAL_TO
 const router = express.Router();
 
 // ===== WEBHOOK FROM GPU SERVER =====
-router.post('/webhook/result', (req, res) => {
+router.post('/webhook/result', async (req, res) => {
   const apiKey = req.headers['x-api-key'];
   if (apiKey !== GPU_API_KEY) return res.status(401).json({ error: 'Unauthorized' });
 
@@ -23,12 +23,14 @@ router.post('/webhook/result', (req, res) => {
   if (!jobId) return res.status(400).json({ error: 'No jobId' });
 
   if (status === 'completed') {
-    db.prepare(`
-      UPDATE jobs SET status='completed', result_txt=?, result_srt=?, result_json=?,
-      completed_at=datetime('now') WHERE id=?
-    `).run(result_txt || '', result_srt || '', result_json || '', jobId);
-
-    const job = db.prepare('SELECT j.*, u.email, u.name FROM jobs j JOIN users u ON j.user_id=u.id WHERE j.id=?').get(jobId);
+    await dbRun(
+      "UPDATE transcribe_jobs SET status='completed', result_txt=?, result_srt=?, result_json=?, completed_at=NOW() WHERE id=?",
+      [result_txt || '', result_srt || '', result_json || '', jobId]
+    );
+    const job = await dbGet(
+      'SELECT j.*, u.email, u.name FROM transcribe_jobs j JOIN transcribe_users u ON j.user_id=u.id WHERE j.id=?',
+      [jobId]
+    );
     if (job) {
       sendEmail(job.email, 'Транскрипция готова!', `
         <h2>Привет, ${escapeHtml(job.name)}!</h2>
@@ -38,25 +40,27 @@ router.post('/webhook/result', (req, res) => {
       `);
     }
   } else if (status === 'error') {
-    db.prepare('UPDATE jobs SET status=?, error=? WHERE id=?').run('error', error || 'Unknown error', jobId);
+    await dbRun('UPDATE transcribe_jobs SET status=?, error=? WHERE id=?', ['error', error || 'Unknown error', jobId]);
   }
 
   res.json({ ok: true });
 });
 
 // ===== GET PROMPT FOR JOB =====
-router.get('/job-prompt/:jobId', (req, res) => {
+router.get('/job-prompt/:jobId', async (req, res) => {
   const apiKey = req.headers['x-api-key'];
   if (apiKey !== GPU_API_KEY) return res.status(401).json({ error: 'Unauthorized' });
 
-  const job = db.prepare('SELECT id, prompt_text, original_name FROM jobs WHERE id = ?').get(req.params.jobId);
+  const job = await dbGet(
+    'SELECT id, prompt_text, original_name FROM transcribe_jobs WHERE id = ?',
+    [req.params.jobId]
+  );
   if (!job) return res.status(404).json({ error: 'Job not found' });
-
   res.json({ jobId: job.id, prompt_text: job.prompt_text, original_name: job.original_name });
 });
 
 // ===== RECEIVE RESULT FROM N8N =====
-router.post('/job-result', (req, res) => {
+router.post('/job-result', async (req, res) => {
   const authHeader = req.headers['authorization'] || '';
   if (!authHeader.startsWith('Bearer ')) return res.status(401).json({ error: 'Unauthorized' });
   try {
@@ -68,10 +72,9 @@ router.post('/job-result', (req, res) => {
   const { filename, result_txt, result_srt, result_json, result_clean } = req.body;
   if (!filename) return res.status(400).json({ error: 'filename required' });
 
-  const job = db.prepare('SELECT * FROM jobs WHERE filename = ?').get(filename);
+  const job = await dbGet('SELECT * FROM transcribe_jobs WHERE filename = ?', [filename]);
   if (!job) return res.status(404).json({ error: 'Job not found', filename });
 
-  // Длительность из JSON
   let durationSec = null;
   if (result_json) {
     try {
@@ -81,14 +84,15 @@ router.post('/job-result', (req, res) => {
     } catch (_) {}
   }
 
-  db.prepare(`
-    UPDATE jobs SET status='completed', result_txt=?, result_srt=?, result_json=?,
-    result_clean=?, duration_sec=?, completed_at=datetime('now') WHERE filename=?
-  `).run(result_txt || '', result_srt || '', result_json || '', result_clean || '', durationSec, filename);
+  await dbRun(
+    "UPDATE transcribe_jobs SET status='completed', result_txt=?, result_srt=?, result_json=?, result_clean=?, duration_sec=?, completed_at=NOW() WHERE filename=?",
+    [result_txt || '', result_srt || '', result_json || '', result_clean || '', durationSec, filename]
+  );
 
-  const fullJob = db.prepare(
-    'SELECT j.*, u.email, u.name FROM jobs j JOIN users u ON j.user_id=u.id WHERE j.filename=?'
-  ).get(filename);
+  const fullJob = await dbGet(
+    'SELECT j.*, u.email, u.name FROM transcribe_jobs j JOIN transcribe_users u ON j.user_id=u.id WHERE j.filename=?',
+    [filename]
+  );
   if (fullJob) {
     sendEmail(fullJob.email, 'Транскрипция готова!', `
       <h2>Привет, ${escapeHtml(fullJob.name)}!</h2>
@@ -97,16 +101,6 @@ router.post('/job-result', (req, res) => {
         text-decoration:none;border-radius:6px;display:inline-block">Открыть результат</a>
       <p>Файл будет доступен ${fullJob.keep_days} дней.</p>
     `);
-  }
-
-  logEvent('job.completed', job.id, job.user_id, {
-    original_name: job.original_name,
-    has_srt: !!result_srt,
-    has_clean: !!result_clean
-  }, 'n8n');
-
-  // Индексируем в Qdrant
-  if (fullJob) {
     sendToQdrant({
       job_id:        fullJob.id,
       text:          result_clean || result_txt || '',
@@ -117,11 +111,17 @@ router.post('/job-result', (req, res) => {
     });
   }
 
+  logEvent('job.completed', job.id, job.user_id, {
+    original_name: job.original_name,
+    has_srt: !!result_srt,
+    has_clean: !!result_clean
+  }, 'n8n');
+
   res.json({ ok: true });
 });
 
 // ===== WATCHDOG EVENT =====
-router.post('/watchdog-event', (req, res) => {
+router.post('/watchdog-event', async (req, res) => {
   const authHeader = req.headers['authorization'] || '';
   if (!authHeader.startsWith('Bearer ')) return res.status(401).json({ error: 'Unauthorized' });
   try { jwt.verify(authHeader.slice(7), JWT_SECRET); } catch(e) { return res.status(401).json({ error: 'Invalid token' }); }
@@ -132,7 +132,7 @@ router.post('/watchdog-event', (req, res) => {
   logEvent(event_type, null, null, details, source || 'watchdog');
 
   if (event_type.includes('critical') || event_type === 'service.restart') {
-    const adminUser = db.prepare("SELECT email FROM users WHERE role='admin' LIMIT 1").get();
+    const adminUser = await dbGet("SELECT email FROM transcribe_users WHERE role='admin' LIMIT 1");
     if (adminUser) {
       sendEmail(adminUser.email, '⚠️ GPU Watchdog: ' + event_type, '<pre>' + JSON.stringify(req.body, null, 2) + '</pre>');
     }
@@ -141,12 +141,8 @@ router.post('/watchdog-event', (req, res) => {
   res.json({ ok: true });
 });
 
-
-// ═══════════════════════════════════════════════════
-// CALLBACK FROM GPU WRAPPER (callback pipeline v1.9.12)
-// ═══════════════════════════════════════════════════
+// ===== CALLBACK FROM GPU WRAPPER =====
 router.post('/callback/transcribe/:jobId', async (req, res) => {
-  // Ленивый require чтобы избежать circular dependency
   const pipeline = require('../utils/gpu-pipeline');
 
   const secret = req.headers['x-callback-secret'];
@@ -157,11 +153,8 @@ router.post('/callback/transcribe/:jobId', async (req, res) => {
   const jobId = req.params.jobId;
   const payload = req.body;
 
-  if (!payload || !payload.type) {
-    return res.status(400).json({ error: 'Missing type in callback' });
-  }
+  if (!payload || !payload.type) return res.status(400).json({ error: 'Missing type in callback' });
 
-  // Отвечаем сразу, обработка асинхронная
   res.json({ ok: true });
 
   try {
@@ -171,80 +164,71 @@ router.post('/callback/transcribe/:jobId', async (req, res) => {
   }
 });
 
-
-// ===== RECONCILE: import results from disk for pending jobs =====
-router.post('/reconcile', (req, res) => {
+// ===== RECONCILE =====
+router.post('/reconcile', async (req, res) => {
   const authHeader = req.headers['authorization'] || '';
   if (!authHeader.startsWith('Bearer ')) return res.status(401).json({ error: 'Unauthorized' });
   try { jwt.verify(authHeader.slice(7), JWT_SECRET); } catch(e) { return res.status(401).json({ error: 'Invalid token' }); }
-  const jobs = db.prepare("SELECT id, filename, original_name, status FROM jobs WHERE status IN ('pending','processing','queued')").all();
+
+  const jobs = await dbAll("SELECT id, filename, original_name, status FROM transcribe_jobs WHERE status IN ('pending','processing','queued')");
   let fixed = 0;
   const fixed_names = [];
-  jobs.forEach(j => {
+  for (const j of jobs) {
     const baseName = j.filename.replace(/\.[^/.]+$/, '');
     const resultPath = path.join(RESULTS_PATH, baseName + '_result.txt');
     if (fs.existsSync(resultPath)) {
       const txt = fs.readFileSync(resultPath, 'utf8');
-      db.prepare("UPDATE jobs SET status='completed', result_txt=?, completed_at=datetime('now') WHERE id=?").run(txt, j.id);
+      await dbRun("UPDATE transcribe_jobs SET status='completed', result_txt=?, completed_at=NOW() WHERE id=?", [txt, j.id]);
       fixed++;
       fixed_names.push(j.original_name);
     }
-  });
+  }
   res.json({ reconciled: fixed, jobs: fixed_names });
 });
 
-
 // ===== MARK JOB AS PROCESSING =====
-router.post('/job-start', (req, res) => {
+router.post('/job-start', async (req, res) => {
   const authHeader = req.headers['authorization'] || '';
   if (!authHeader.startsWith('Bearer ')) return res.status(401).json({ error: 'Unauthorized' });
   try { jwt.verify(authHeader.slice(7), JWT_SECRET); } catch(e) { return res.status(401).json({ error: 'Invalid token' }); }
+
   const { filename } = req.body;
   if (!filename) return res.status(400).json({ error: 'filename required' });
-  const job = db.prepare("SELECT id FROM jobs WHERE filename = ?").get(filename);
+  const job = await dbGet("SELECT id FROM transcribe_jobs WHERE filename = ?", [filename]);
   if (job) {
-    db.prepare("UPDATE jobs SET status = 'processing' WHERE id = ?").run(job.id);
+    await dbRun("UPDATE transcribe_jobs SET status = 'processing' WHERE id = ?", [job.id]);
     res.json({ ok: true, job_id: job.id });
   } else {
     res.json({ ok: false, message: 'job not found' });
   }
 });
 
-
-
-// ===== EVENTS API (for admin dashboard) =====
-router.get('/events', (req, res) => {
+// ===== EVENTS API =====
+router.get('/events', async (req, res) => {
   const token = req.headers['x-internal-token'];
-  if (!token || token !== INTERNAL_TOKEN) {
-    return res.status(403).json({ error: 'Invalid internal token' });
-  }
+  if (!token || token !== INTERNAL_TOKEN) return res.status(403).json({ error: 'Invalid internal token' });
 
-  const from = req.query.from || '2020-01-01';
-  const to = req.query.to || '2099-12-31';
+  const from  = req.query.from  || '2020-01-01';
+  const to    = req.query.to    || '2099-12-31';
   const limit = Math.min(parseInt(req.query.limit) || 50, 200);
 
-  const rows = db.prepare(`
+  const rows = await dbAll(`
     SELECT e.*, j.original_name, j.filename, u.name as user_name
-    FROM events e
-    LEFT JOIN jobs j ON e.job_id = j.id
-    LEFT JOIN users u ON e.user_id = u.id
+    FROM transcribe_events e
+    LEFT JOIN transcribe_jobs j ON e.job_id = j.id
+    LEFT JOIN transcribe_users u ON e.user_id = u.id
     WHERE e.timestamp >= ? AND e.timestamp <= ? || ' 23:59:59'
     ORDER BY e.timestamp DESC
     LIMIT ?
-  `).all(from, to, limit);
+  `, [from, to, limit]);
 
   const events = rows.map(r => {
     let message = r.event_type;
-    if (r.event_type === 'job.completed' && r.original_name)
-      message = '\u0422\u0440\u0430\u043d\u0441\u043a\u0440\u0438\u0431\u0430\u0446\u0438\u044f: ' + r.original_name;
-    else if (r.event_type === 'job.error' && r.original_name)
-      message = '\u041e\u0448\u0438\u0431\u043a\u0430: ' + r.original_name;
-    else if (r.event_type === 'gpu.unshelve')
-      message = 'GPU \u0441\u0435\u0440\u0432\u0435\u0440 \u0437\u0430\u043f\u0443\u0449\u0435\u043d';
-    else if (r.event_type === 'gpu.shelve')
-      message = 'GPU \u0441\u0435\u0440\u0432\u0435\u0440 \u043e\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d';
-    else if (r.event_type === 'service.restart')
-      message = '\u041f\u0435\u0440\u0435\u0437\u0430\u043f\u0443\u0441\u043a \u0441\u0435\u0440\u0432\u0438\u0441\u0430';
+    if (r.event_type === 'job.completed' && r.original_name) message = 'Транскрипция: ' + r.original_name;
+    else if (r.event_type === 'job.error' && r.original_name) message = 'Ошибка: ' + r.original_name;
+    else if (r.event_type === 'gpu.unshelve') message = 'GPU сервер запущен';
+    else if (r.event_type === 'gpu.shelve') message = 'GPU сервер остановлен';
+    else if (r.event_type === 'service.restart') message = 'Перезапуск сервиса';
 
     let details = null;
     try { details = r.details ? JSON.parse(r.details) : null; } catch(_) { details = r.details; }
@@ -262,8 +246,7 @@ router.get('/events', (req, res) => {
   res.json(events);
 });
 
-
-// ── Qdrant indexing (fire-and-forget) ──────────────────────
+// ── Qdrant helpers ────────────────────────────────────────────
 function sendToQdrant({ job_id, text, source, username, original_name, created_at }) {
   const body = JSON.stringify({
     job_id:        String(job_id),
@@ -275,18 +258,12 @@ function sendToQdrant({ job_id, text, source, username, original_name, created_a
   });
   const http = require('http');
   const req = http.request({
-    hostname: 'n8n', port: 5678,
-    path: '/webhook/qdrant-index',
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Content-Length': Buffer.byteLength(body),
-    },
+    hostname: 'n8n', port: 5678, path: '/webhook/qdrant-index', method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
     timeout: 10000,
-  }, (r) => { r.resume(); console.log(`[qdrant] ${source}#${job_id}: ${r.statusCode}`); });
-  req.on('error', (e) => console.error(`[qdrant] ${source}#${job_id}: ${e.message}`));
-  req.write(body);
-  req.end();
+  }, (r) => { r.resume(); });
+  req.on('error', () => {});
+  req.write(body); req.end();
 }
 
 module.exports = router;

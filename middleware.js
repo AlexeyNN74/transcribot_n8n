@@ -1,67 +1,58 @@
 'use strict';
-// Version: 1.9.11 - MelkiAuth integration
-// Updated: 2026-04-18
+// middleware.js v2.0 — PostgreSQL edition
+// Updated: 2026-04-24
 
 const jwt = require('jsonwebtoken');
 const { v4: uuidv4 } = require('uuid');
-const { db } = require('./db');
+const { dbGet, dbRun } = require('./db');
 const { JWT_SECRET } = require('./config');
 
-/**
- * Najti ili sozdat polzovatelja po dannym iz MelkiAuth headers
- */
-function getOrCreateUser(username, email, groups) {
-  // 1. Iskat po imeni (username iz Authentik)
-  let user = db.prepare('SELECT * FROM users WHERE name = ?').get(username);
+async function getOrCreateUser(username, email, groups) {
+  let user = await dbGet('SELECT * FROM transcribe_users WHERE name = ?', [username]);
 
-  // 2. Iskat po email
   if (!user && email) {
-    user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
+    user = await dbGet('SELECT * FROM transcribe_users WHERE email = ?', [email]);
   }
 
   if (!user) {
-    // Avtosozdanije polzovatelja
     const id = uuidv4();
     const role = (groups && groups.includes('admins')) ? 'admin' : 'user';
     const userEmail = email || (username + '@melki.top');
-    db.prepare(
-      'INSERT INTO users (id, email, name, role, active, password) VALUES (?, ?, ?, ?, 1, ?)'
-    ).run(id, userEmail, username, role, 'melki-auth');
-    user = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
+    await dbRun(
+      'INSERT INTO transcribe_users (id, email, name, role, active, password) VALUES (?, ?, ?, ?, 1, ?)',
+      [id, userEmail, username, role, 'melki-auth']
+    );
+    user = await dbGet('SELECT * FROM transcribe_users WHERE id = ?', [id]);
     console.log('[AUTH] Auto-created user:', username, '(' + userEmail + ') role=' + role);
   } else {
-    // Obnovit rol esli gruppy izmenilis
     const newRole = (groups && groups.includes('admins')) ? 'admin' : 'user';
     if (user.role !== newRole) {
-      db.prepare('UPDATE users SET role = ? WHERE id = ?').run(newRole, user.id);
+      await dbRun('UPDATE transcribe_users SET role = ? WHERE id = ?', [newRole, user.id]);
       user.role = newRole;
     }
-    // Obnovit last_login
-    db.prepare("UPDATE users SET last_login = datetime('now') WHERE id = ?").run(user.id);
+    await dbRun("UPDATE transcribe_users SET last_login = NOW() WHERE id = ?", [user.id]);
   }
 
   return user;
 }
 
-/**
- * Auth middleware - 2 rezhima:
- * 1. MelkiAuth headers (ot Caddy forward_auth) - osnovnoj
- * 2. Bearer JWT (dlya n8n internal API) - fallback
- */
-function authMiddleware(req, res, next) {
-  // 1. MelkiAuth headers
+async function authMiddleware(req, res, next) {
   const username = req.headers['x-authentik-username'] || req.headers['remote-user'];
   if (username) {
     const email = req.headers['x-authentik-email'] || req.headers['remote-email'] || '';
     const groupsRaw = req.headers['x-authentik-groups'] || req.headers['remote-groups'] || '';
     const groups = groupsRaw.split(',').filter(Boolean);
 
-    const user = getOrCreateUser(username, email, groups);
-    req.user = { id: user.id, email: user.email, name: user.name, role: user.role };
-    return next();
+    try {
+      const user = await getOrCreateUser(username, email, groups);
+      req.user = { id: user.id, email: user.email, name: user.name, role: user.role };
+      return next();
+    } catch (e) {
+      console.error('[AUTH] Error:', e.message);
+      return res.status(500).json({ error: 'Auth error' });
+    }
   }
 
-  // 2. Fallback: Bearer JWT (n8n, internal API)
   const token = req.headers.authorization?.replace('Bearer ', '');
   if (token) {
     try {
@@ -75,8 +66,8 @@ function authMiddleware(req, res, next) {
   return res.status(401).json({ error: 'Net avtorizatsii' });
 }
 
-function adminMiddleware(req, res, next) {
-  authMiddleware(req, res, () => {
+async function adminMiddleware(req, res, next) {
+  await authMiddleware(req, res, () => {
     if (req.user.role !== 'admin') {
       return res.status(403).json({ error: 'Net dostupa' });
     }

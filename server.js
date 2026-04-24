@@ -1,4 +1,4 @@
-// Студия Транскрибации — server.js (модульный)
+// Студия Транскрибации — server.js v2.0 (PostgreSQL)
 process.on('uncaughtException', (err) => {
   console.error('[FATAL] Uncaught exception:', err.message);
   console.error(err.stack);
@@ -7,9 +7,8 @@ process.on('unhandledRejection', (reason) => {
   console.error('[FATAL] Unhandled rejection:', reason);
 });
 'use strict';
-// Version: 1.9.8
-// Updated: 2026-04-15
-
+// Version: 2.0.0 (PostgreSQL)
+// Updated: 2026-04-24
 
 const express = require('express');
 const path = require('path');
@@ -17,7 +16,7 @@ const rateLimit = require('express-rate-limit');
 const bcrypt = require('bcryptjs');
 const { v4: uuidv4 } = require('uuid');
 
-const { db } = require('./db');
+const { pool, dbGet, dbRun, initDb } = require('./db');
 const { escapeHtml, logEvent } = require('./utils/helpers');
 const { sendEmail } = require('./utils/email');
 const { PORT, UPLOAD_PATH, RESULTS_PATH, APP_URL, ADMIN_EMAIL } = require('./config');
@@ -45,39 +44,33 @@ app.use('/api/prompts',  require('./routes/prompts'));
 app.use('/api/jobs',     require('./routes/jobs'));
 app.use('/api/internal', require('./routes/internal'));
 app.use('/api/admin',    require('./routes/admin'));
-
-// Legacy path: /api/webhook/result (internal router handles /webhook/result)
-app.use('/api', require('./routes/internal'));
+app.use('/api',          require('./routes/internal'));
 
 // ===== HEALTH & VERSION =====
 app.get('/api/version', (req, res) => res.json({
-  version: '1.9.10', node: process.version, uptime_s: Math.floor(process.uptime())
+  version: '2.0.0', node: process.version, uptime_s: Math.floor(process.uptime())
 }));
 
-app.get('/api/health', (req, res) => {
+app.get('/api/health', async (req, res) => {
   try {
-    const dbOk = !!db.prepare('SELECT 1').get();
-    const pending    = db.prepare("SELECT COUNT(*) as c FROM jobs WHERE status='pending'").get().c;
-    const processing = db.prepare("SELECT COUNT(*) as c FROM jobs WHERE status='processing'").get().c;
-    const queued     = db.prepare("SELECT COUNT(*) as c FROM jobs WHERE status='queued'").get().c;
-    res.json({ ok: true, version: '1.9.10', uptime_s: Math.floor(process.uptime()), db: dbOk, queue: { queued, pending, processing } });
+    await pool.query('SELECT 1');
+    const pending    = await dbGet("SELECT COUNT(*)::int as c FROM transcribe_jobs WHERE status='pending'");
+    const processing = await dbGet("SELECT COUNT(*)::int as c FROM transcribe_jobs WHERE status='processing'");
+    const queued     = await dbGet("SELECT COUNT(*)::int as c FROM transcribe_jobs WHERE status='queued'");
+    res.json({ ok: true, version: '2.0.0', uptime_s: Math.floor(process.uptime()), db: true,
+               queue: { queued: queued.c, pending: pending.c, processing: processing.c } });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }
 });
 
-// ===== GPU STATUS (backward-compatible /api/gpu/* paths) =====
+// ===== GPU STATUS =====
 const { adminMiddleware } = require('./middleware');
 const { gpuGetStatus, gpuDoAction } = require('./routes/admin');
 
 app.get('/api/gpu/status', adminMiddleware, async (req, res) => {
-  try {
-    const status = await gpuGetStatus();
-    res.json({ ok: true, status });
-  } catch (e) {
-    console.error('[GPU]', e.message);
-    res.status(500).json({ ok: false, error: e.message });
-  }
+  try { res.json({ ok: true, status: await gpuGetStatus() }); }
+  catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
 app.post('/api/gpu/action', adminMiddleware, async (req, res) => {
@@ -90,76 +83,96 @@ app.post('/api/gpu/action', adminMiddleware, async (req, res) => {
     logEvent('gpu.' + action, null, req.user.id);
     res.json({ ok: true, action });
   } catch (e) {
-    console.error('[GPU]', e.message);
     res.status(500).json({ ok: false, error: e.message });
   }
 });
 
 // ===== CLEANUP =====
-function cleanupExpiredJobs() {
-  const expired = db.prepare("SELECT * FROM jobs WHERE expires_at < datetime('now') AND status IN ('completed','error') AND status!='archived'").all();
-  expired.forEach(job => {
-    const filePath = require('path').join(UPLOAD_PATH, require('path').basename(job.filename));
-    if (filePath.startsWith(UPLOAD_PATH) && require('fs').existsSync(filePath)) require('fs').unlinkSync(filePath);
-    db.prepare("UPDATE jobs SET status='archived', archived_at=datetime('now') WHERE id=?").run(job.id);
-    console.log(`Soft-deleted expired job: ${job.id}`);
-  });
+async function cleanupExpiredJobs() {
+  try {
+    const expired = await pool.query(
+      "SELECT * FROM transcribe_jobs WHERE expires_at < NOW() AND status IN ('completed','error') AND status!='archived'"
+    );
+    for (const job of expired.rows) {
+      const filePath = require('path').join(UPLOAD_PATH, require('path').basename(job.filename));
+      if (filePath.startsWith(UPLOAD_PATH) && require('fs').existsSync(filePath)) require('fs').unlinkSync(filePath);
+      await pool.query("UPDATE transcribe_jobs SET status='archived', archived_at=NOW() WHERE id=$1", [job.id]);
+      console.log(`Soft-deleted expired job: ${job.id}`);
+    }
+  } catch (e) {
+    console.error('[cleanup]', e.message);
+  }
 }
 setInterval(cleanupExpiredJobs, 60 * 60 * 1000);
 
 // ===== STUCK JOBS =====
-function checkStuckJobs() {
-  const twoHoursAgo = new Date(Date.now() - 12 * 60 * 60 * 1000).toISOString().replace('T',' ').replace('Z','');
-  const stuck = db.prepare(`
-    SELECT * FROM jobs WHERE status IN ('processing', 'pending', 'queued') AND created_at < ?
-  `).all(twoHoursAgo);
-
-  if (stuck.length === 0) return;
-
-  stuck.forEach(job => {
-    db.prepare(`UPDATE jobs SET status='error', error='Таймаут: задание зависло (>12ч)', completed_at=datetime('now') WHERE id=?`).run(job.id);
-    console.warn(`[STUCK] Job ${job.id} (${job.original_name}) → error (timeout)`);
-    logEvent('job.stuck', job.id, job.user_id, { original_name: job.original_name }, 'system');
-  });
-
-  const adminUser = db.prepare("SELECT email FROM users WHERE role='admin' LIMIT 1").get();
-  if (adminUser) {
-    const list = stuck.map(j =>
-      `<li><b>${escapeHtml(j.original_name)}</b> — создан ${j.created_at}, статус был: ${j.status}</li>`
-    ).join('');
-    sendEmail(
-      adminUser.email,
-      `⚠️ Студия: ${stuck.length} зависш${stuck.length === 1 ? 'ее задание' : 'их заданий'}`,
-      `<p>Следующие задания зависли более 2 часов и переведены в статус <b>error</b>:</p>
-       <ul>${list}</ul>
-       <p><a href="${APP_URL}/admin">Открыть админку</a></p>`
+async function checkStuckJobs() {
+  try {
+    const stuck = await pool.query(
+      "SELECT * FROM transcribe_jobs WHERE status IN ('processing', 'pending', 'queued') AND created_at < NOW() - INTERVAL '12 hours'"
     );
+    if (stuck.rows.length === 0) return;
+
+    for (const job of stuck.rows) {
+      await pool.query(
+        "UPDATE transcribe_jobs SET status='error', error='Таймаут: задание зависло (>12ч)', completed_at=NOW() WHERE id=$1",
+        [job.id]
+      );
+      console.warn(`[STUCK] Job ${job.id} (${job.original_name}) → error (timeout)`);
+      logEvent('job.stuck', job.id, job.user_id, { original_name: job.original_name }, 'system');
+    }
+
+    const adminUser = await dbGet("SELECT email FROM transcribe_users WHERE role='admin' LIMIT 1");
+    if (adminUser) {
+      const list = stuck.rows.map(j =>
+        `<li><b>${escapeHtml(j.original_name)}</b> — создан ${j.created_at}, статус: ${j.status}</li>`
+      ).join('');
+      sendEmail(
+        adminUser.email,
+        `⚠️ Студия: ${stuck.rows.length} зависш${stuck.rows.length === 1 ? 'ее задание' : 'их заданий'}`,
+        `<p>Следующие задания зависли более 12 часов:</p><ul>${list}</ul>
+         <p><a href="${APP_URL}/admin">Открыть админку</a></p>`
+      );
+    }
+  } catch (e) {
+    console.error('[stuck-check]', e.message);
   }
 }
 setInterval(checkStuckJobs, 10 * 60 * 1000);
-checkStuckJobs();
 
 // ===== BOOTSTRAP =====
-const adminExists = db.prepare("SELECT id FROM users WHERE role='admin'").get();
-if (!adminExists) {
-  const adminId = uuidv4();
-  const adminPassword = bcrypt.hashSync('admin123', 10);
-  db.prepare("INSERT INTO users (id, email, password, name, role, active) VALUES (?, ?, ?, ?, 'admin', 1)")
-    .run(adminId, ADMIN_EMAIL || 'admin@melki.top', adminPassword, 'Администратор');
-  console.log('Default admin created: admin@melki.top / admin123');
-  console.log('CHANGE THE PASSWORD IMMEDIATELY!');
+async function bootstrap() {
+  await initDb();
+
+  // Create default admin if not exists
+  const adminExists = await dbGet("SELECT id FROM transcribe_users WHERE role='admin'");
+  if (!adminExists) {
+    const adminId = uuidv4();
+    const adminPassword = await bcrypt.hash('admin123', 10);
+    await pool.query(
+      "INSERT INTO transcribe_users (id, email, password, name, role, active) VALUES ($1, $2, $3, $4, 'admin', 1)",
+      [adminId, ADMIN_EMAIL || 'admin@melki.top', adminPassword, 'Администратор']
+    );
+    console.log('Default admin created: admin@melki.top / admin123');
+    console.log('CHANGE THE PASSWORD IMMEDIATELY!');
+  }
+
+  checkStuckJobs();
+
+  const server = app.listen(PORT, () => {
+    console.log(`Transcribe Studio v2.0.0 (PostgreSQL) running on port ${PORT}`);
+  });
+
+  process.on('SIGTERM', () => {
+    console.log('SIGTERM received, shutting down...');
+    server.close(() => {
+      pool.end();
+      process.exit(0);
+    });
+  });
 }
 
-// ===== START =====
-const server = app.listen(PORT, () => {
-  console.log(`Transcribe Studio v1.9.6 running on port ${PORT}`);
-});
-
-// Graceful shutdown
-process.on('SIGTERM', () => {
-  console.log('SIGTERM received, shutting down...');
-  server.close(() => {
-    db.close();
-    process.exit(0);
-  });
+bootstrap().catch(e => {
+  console.error('[FATAL] Bootstrap failed:', e.message);
+  process.exit(1);
 });

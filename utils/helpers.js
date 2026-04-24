@@ -1,26 +1,27 @@
 'use strict';
-// Version: 1.9.8
-// Updated: 2026-04-11
+// utils/helpers.js v2.0 — PostgreSQL edition
+// Updated: 2026-04-24
 
 const fs = require('fs');
-const { db } = require('../db');
+const { pool, pgify } = require('../db');
 
 function escapeHtml(s) {
   if (!s) return '';
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
-function logEvent(eventType, jobId = null, userId = null, details = null, source = 'web') {
+// Fire-and-forget logging — callers don't need to await
+async function logEvent(eventType, jobId = null, userId = null, details = null, source = 'web') {
   try {
-    db.prepare(
-      'INSERT INTO events (event_type, job_id, user_id, details, source) VALUES (?, ?, ?, ?, ?)'
-    ).run(eventType, jobId, userId, typeof details === 'object' ? JSON.stringify(details) : details, source);
+    await pool.query(
+      pgify('INSERT INTO transcribe_events (event_type, job_id, user_id, details, source) VALUES (?, ?, ?, ?, ?)'),
+      [eventType, jobId, userId, typeof details === 'object' ? JSON.stringify(details) : details, source]
+    );
   } catch (e) {
     console.error('[logEvent]', e.message);
   }
 }
 
-// ===== FILE TYPE DETECTION =====
 const AUDIO_EXTS = new Set(['.mp3','.wav','.ogg','.flac','.m4a','.aac','.wma']);
 const VIDEO_EXTS = new Set(['.mp4','.mkv','.avi','.mov','.webm']);
 

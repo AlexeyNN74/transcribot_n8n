@@ -1,164 +1,170 @@
 'use strict';
-const Database = require('better-sqlite3');
+// db.js v2.0 — PostgreSQL edition
+// Updated: 2026-04-24
+
+const { Pool } = require('pg');
 const { v4: uuidv4 } = require('uuid');
-const { DB_PATH } = require('./config');
 
-const db = new Database(DB_PATH);
-
-// ===== TABLES =====
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    id TEXT PRIMARY KEY,
-    email TEXT UNIQUE NOT NULL,
-    password TEXT NOT NULL,
-    name TEXT NOT NULL,
-    role TEXT DEFAULT 'user',
-    active INTEGER DEFAULT 0,
-    activation_token TEXT,
-    created_at TEXT DEFAULT (datetime('now')),
-    last_login TEXT
-  );
-
-  CREATE TABLE IF NOT EXISTS jobs (
-    id TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL,
-    filename TEXT NOT NULL,
-    original_name TEXT NOT NULL,
-    status TEXT DEFAULT 'pending',
-    progress INTEGER DEFAULT 0,
-    result_txt TEXT,
-    result_srt TEXT,
-    result_json TEXT,
-    result_clean TEXT,
-    error TEXT,
-    keep_days INTEGER DEFAULT 7,
-    created_at TEXT DEFAULT (datetime('now')),
-    completed_at TEXT,
-    expires_at TEXT,
-    FOREIGN KEY(user_id) REFERENCES users(id)
-  );
-
-  CREATE TABLE IF NOT EXISTS settings (
-    key TEXT PRIMARY KEY,
-    value TEXT
-  );
-
-  CREATE TABLE IF NOT EXISTS events (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    timestamp TEXT DEFAULT (datetime('now')),
-    event_type TEXT NOT NULL,
-    job_id TEXT,
-    user_id TEXT,
-    details TEXT,
-    source TEXT DEFAULT 'web'
-  );
-  CREATE INDEX IF NOT EXISTS idx_events_ts ON events(timestamp);
-  CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type);
-  CREATE INDEX IF NOT EXISTS idx_events_job ON events(job_id);
-
-  CREATE TABLE IF NOT EXISTS prompts (
-    id TEXT PRIMARY KEY,
-    user_id TEXT,
-    name TEXT NOT NULL,
-    description TEXT DEFAULT '',
-    prompt_text TEXT NOT NULL,
-    is_default INTEGER DEFAULT 0,
-    is_system INTEGER DEFAULT 0,
-    created_at TEXT DEFAULT (datetime('now')),
-    FOREIGN KEY(user_id) REFERENCES users(id)
-  );
-
-  CREATE TABLE IF NOT EXISTS gpu_sessions (
-    id TEXT PRIMARY KEY,
-    unshelve_at TEXT NOT NULL,
-    shelve_at TEXT,
-    duration_sec REAL,
-    jobs_count INTEGER DEFAULT 0,
-    job_ids TEXT DEFAULT '[]',
-    trigger_type TEXT DEFAULT 'auto',
-    status TEXT DEFAULT 'active'
-  );
-  CREATE INDEX IF NOT EXISTS idx_gpu_sessions_unshelve ON gpu_sessions(unshelve_at);
-`);
-
-// ===== MIGRATIONS =====
-['prompt_id TEXT', 'prompt_text TEXT', 'rating INTEGER', 'diarize INTEGER DEFAULT 0', 'result_clean TEXT', 'duration_sec REAL', 'video_limit_mb INTEGER DEFAULT 200', 'archived_at TEXT', 'archived_at TEXT'].forEach(col => {
-  try { db.exec(`ALTER TABLE jobs ADD COLUMN ${col}`); } catch (_) {}
+const pool = new Pool({
+  host:     process.env.PG_HOST     || 'melki_postgres',
+  port:     parseInt(process.env.PG_PORT || '5432'),
+  database: process.env.PG_DB       || 'melki',
+  user:     process.env.PG_USER     || 'melki',
+  password: process.env.PG_PASSWORD || 'melki2026',
+  max: 10,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 5000,
 });
 
-// ===== SEED PROMPTS =====
-const promptCount = db.prepare('SELECT COUNT(*) as c FROM prompts WHERE is_system=1').get().c;
-if (promptCount === 0) {
-  db.prepare(`
-    INSERT INTO prompts (id, user_id, name, description, prompt_text, is_default, is_system)
-    VALUES (?, NULL, ?, ?, ?, 1, 1)
-  `).run(
-    uuidv4(),
-    'Универсальный',
-    'Подходит для любого типа записи',
-    `Ты — профессиональный редактор транскрипций. Перед тобой транскрипция аудио/видео записи.
+// Converts SQLite ? placeholders to PostgreSQL $1, $2, ...
+const pgify = (sql) => { let i = 0; return sql.replace(/\?/g, () => `$${++i}`); };
 
-Твоя задача:
-1. Составь краткое саммари (3-5 предложений) — о чём запись в целом.
-2. Выдели ключевые темы и тезисы — маркированным списком.
-3. Если есть конкретные факты, цифры, имена — сохрани их точно.
-4. Язык саммари должен совпадать с языком записи.
+const dbGet = async (sql, params = []) => {
+  const r = await pool.query(pgify(sql), params);
+  return r.rows[0] || null;
+};
 
-Отвечай только структурированным текстом, без вводных фраз.`
-  );
+const dbAll = async (sql, params = []) => {
+  const r = await pool.query(pgify(sql), params);
+  return r.rows;
+};
 
-  const systemProfiles = [
-    {
-      name: 'Вебинар',
-      description: 'Обучающие вебинары и онлайн-курсы',
-      prompt: `Ты — ассистент по обработке вебинаров. Перед тобой транскрипция обучающего вебинара.
+const dbRun = async (sql, params = []) => {
+  const r = await pool.query(pgify(sql), params);
+  return { rowCount: r.rowCount, rows: r.rows };
+};
 
-Составь структурированный конспект:
-1. Тема вебинара и спикер (если упоминается).
-2. Основные блоки и темы — с заголовками.
-3. Ключевые тезисы и выводы по каждому блоку.
-4. Практические советы и рекомендации (если есть).
-5. Вопросы из аудитории и ответы (если есть).
+async function initDb() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS transcribe_users (
+      id               TEXT PRIMARY KEY,
+      email            TEXT UNIQUE NOT NULL,
+      password         TEXT NOT NULL DEFAULT '',
+      name             TEXT NOT NULL,
+      role             TEXT DEFAULT 'user',
+      active           INTEGER DEFAULT 0,
+      activation_token TEXT,
+      video_limit_mb   INTEGER DEFAULT 200,
+      created_at       TIMESTAMPTZ DEFAULT NOW(),
+      last_login       TIMESTAMPTZ
+    )
+  `);
 
-Язык вывода — язык записи. Без вводных фраз.`
-    },
-    {
-      name: 'Медитация',
-      description: 'Медитации, практики, релаксация',
-      prompt: `Ты — помощник для обработки медитативных практик. Перед тобой транскрипция медитации или практики.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS transcribe_jobs (
+      id            TEXT PRIMARY KEY,
+      user_id       TEXT NOT NULL,
+      filename      TEXT NOT NULL,
+      original_name TEXT NOT NULL,
+      status        TEXT DEFAULT 'pending',
+      progress      INTEGER DEFAULT 0,
+      progress_msg  TEXT,
+      result_txt    TEXT,
+      result_srt    TEXT,
+      result_json   TEXT,
+      result_clean  TEXT,
+      error         TEXT,
+      keep_days     INTEGER DEFAULT 7,
+      prompt_id     TEXT,
+      prompt_text   TEXT,
+      rating        INTEGER,
+      diarize       INTEGER DEFAULT 0,
+      min_speakers  INTEGER,
+      max_speakers  INTEGER,
+      noise_filter  TEXT,
+      duration_sec  REAL,
+      archived_at   TIMESTAMPTZ,
+      created_at    TIMESTAMPTZ DEFAULT NOW(),
+      completed_at  TIMESTAMPTZ,
+      expires_at    TIMESTAMPTZ
+    )
+  `);
 
-Составь описание:
-1. Тип практики и её цель.
-2. Основные этапы (с таймингом если есть).
-3. Ключевые инструкции и образы, которые использует ведущий.
-4. Общая атмосфера и особенности подачи.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS transcribe_settings (
+      key   TEXT PRIMARY KEY,
+      value TEXT
+    )
+  `);
 
-Тон — спокойный, нейтральный. Язык вывода — язык записи.`
-    },
-    {
-      name: 'Консультация',
-      description: 'Бизнес-консультации, коучинг, интервью',
-      prompt: `Ты — ассистент по обработке деловых консультаций. Перед тобой транскрипция консультации или интервью.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS transcribe_events (
+      id         BIGSERIAL PRIMARY KEY,
+      timestamp  TIMESTAMPTZ DEFAULT NOW(),
+      event_type TEXT NOT NULL,
+      job_id     TEXT,
+      user_id    TEXT,
+      details    TEXT,
+      source     TEXT DEFAULT 'web'
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_tr_events_ts   ON transcribe_events(timestamp)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_tr_events_type ON transcribe_events(event_type)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_tr_events_job  ON transcribe_events(job_id)`);
 
-Составь структурированный отчёт:
-1. Участники и контекст встречи.
-2. Обсуждаемые проблемы/задачи.
-3. Предложенные решения и рекомендации.
-4. Договорённости и следующие шаги (если есть).
-5. Ключевые цитаты (если значимы).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS transcribe_prompts (
+      id          TEXT PRIMARY KEY,
+      user_id     TEXT,
+      name        TEXT NOT NULL,
+      description TEXT DEFAULT '',
+      prompt_text TEXT NOT NULL,
+      is_default  INTEGER DEFAULT 0,
+      is_system   INTEGER DEFAULT 0,
+      created_at  TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
 
-Язык вывода — язык записи. Деловой стиль.`
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS transcribe_gpu_sessions (
+      id           TEXT PRIMARY KEY,
+      unshelve_at  TIMESTAMPTZ NOT NULL,
+      shelve_at    TIMESTAMPTZ,
+      duration_sec REAL,
+      jobs_count   INTEGER DEFAULT 0,
+      job_ids      TEXT DEFAULT '[]',
+      trigger_type TEXT DEFAULT 'auto',
+      status       TEXT DEFAULT 'active'
+    )
+  `);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_tr_gpu_sessions ON transcribe_gpu_sessions(unshelve_at)`);
+
+  // Seed default prompts
+  const { rows } = await pool.query('SELECT COUNT(*)::int as c FROM transcribe_prompts WHERE is_system=1');
+  if (rows[0].c === 0) {
+    await pool.query(
+      `INSERT INTO transcribe_prompts (id, user_id, name, description, prompt_text, is_default, is_system)
+       VALUES ($1, NULL, $2, $3, $4, 1, 1)`,
+      [uuidv4(), 'Универсальный', 'Подходит для любого типа записи',
+        `Ты — профессиональный редактор транскрипций. Перед тобой транскрипция аудио/видео записи.\n\nТвоя задача:\n1. Составь краткое саммари (3-5 предложений) — о чём запись в целом.\n2. Выдели ключевые темы и тезисы — маркированным списком.\n3. Если есть конкретные факты, цифры, имена — сохрани их точно.\n4. Язык саммари должен совпадать с языком записи.\n\nОтвечай только структурированным текстом, без вводных фраз.`]
+    );
+
+    const systemProfiles = [
+      {
+        name: 'Вебинар', desc: 'Обучающие вебинары и онлайн-курсы',
+        prompt: 'Ты — ассистент по обработке вебинаров. Перед тобой транскрипция обучающего вебинара.\n\nСоставь структурированный конспект:\n1. Тема вебинара и спикер (если упоминается).\n2. Основные блоки и темы — с заголовками.\n3. Ключевые тезисы и выводы по каждому блоку.\n4. Практические советы и рекомендации (если есть).\n5. Вопросы из аудитории и ответы (если есть).\n\nЯзык вывода — язык записи. Без вводных фраз.',
+      },
+      {
+        name: 'Медитация', desc: 'Медитации, практики, релаксация',
+        prompt: 'Ты — помощник для обработки медитативных практик. Перед тобой транскрипция медитации или практики.\n\nСоставь описание:\n1. Тип практики и её цель.\n2. Основные этапы (с таймингом если есть).\n3. Ключевые инструкции и образы, которые использует ведущий.\n4. Общая атмосфера и особенности подачи.\n\nТон — спокойный, нейтральный. Язык вывода — язык записи.',
+      },
+      {
+        name: 'Консультация', desc: 'Бизнес-консультации, коучинг, интервью',
+        prompt: 'Ты — ассистент по обработке деловых консультаций. Перед тобой транскрипция консультации или интервью.\n\nСоставь структурированный отчёт:\n1. Участники и контекст встречи.\n2. Обсуждаемые проблемы/задачи.\n3. Предложенные решения и рекомендации.\n4. Договорённости и следующие шаги (если есть).\n5. Ключевые цитаты (если значимы).\n\nЯзык вывода — язык записи. Деловой стиль.',
+      },
+    ];
+
+    for (const p of systemProfiles) {
+      await pool.query(
+        `INSERT INTO transcribe_prompts (id, user_id, name, description, prompt_text, is_default, is_system)
+         VALUES ($1, NULL, $2, $3, $4, 0, 1)`,
+        [uuidv4(), p.name, p.desc, p.prompt]
+      );
     }
-  ];
+    console.log('[db] Default prompt profiles created');
+  }
 
-  systemProfiles.forEach(p => {
-    db.prepare(`
-      INSERT INTO prompts (id, user_id, name, description, prompt_text, is_default, is_system)
-      VALUES (?, NULL, ?, ?, ?, 0, 1)
-    `).run(uuidv4(), p.name, p.description, p.prompt);
-  });
-
-  console.log('Default prompt profiles created');
+  console.log('[db] PostgreSQL initialized (transcribe schema)');
 }
 
-module.exports = { db };
+module.exports = { pool, pgify, dbGet, dbAll, dbRun, initDb };

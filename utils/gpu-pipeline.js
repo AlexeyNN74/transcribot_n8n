@@ -1,17 +1,7 @@
 'use strict';
 /**
- * gpu-pipeline.js — Оркестратор GPU-задач транскрибации
- * ═══════════════════════════════════════════════════════
- *   Версия : 1.0
- *   Дата   : 2026-04-19
- *   Место  : 🟢 Веб-сервер, /opt/transcribe/app/utils/gpu-pipeline.js
- * ═══════════════════════════════════════════════════════
- *
- * Архитектура:
- *   Upload → enqueueJob() → processQueue() →
- *     unshelve GPU → SCP файл → SSH nohup gpu_wrapper.py →
- *     [GPU: diarize/whisper → callback] →
- *     handleCallback() → SCP результаты → Claude summary → DB → email → shelve
+ * gpu-pipeline.js v2.0 — PostgreSQL edition
+ * Updated: 2026-04-24
  */
 
 const { exec } = require('child_process');
@@ -20,49 +10,19 @@ const fs = require('fs');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 
-const { db } = require('../db');
+const { pool, pgify, dbGet, dbAll, dbRun } = require('../db');
 const { logEvent, escapeHtml } = require('../utils/helpers');
 const { sendEmail } = require('../utils/email');
 
 const execAsync = promisify(exec);
 
 // ═══════════════════════════════════════════════════
-// Кэшированные prepared statements (создаются 1 раз)
-// ═══════════════════════════════════════════════════
-// Инициализируются лениво после db загрузки
-let _stmts = null;
-function stmts() {
-  if (!_stmts) {
-    _stmts = {
-      setProgress:     db.prepare("UPDATE jobs SET progress_msg=?, progress=? WHERE id=?"),
-      setProgressMsg:  db.prepare("UPDATE jobs SET progress_msg=? WHERE id=?"),
-      setProcessing:   db.prepare("UPDATE jobs SET status='processing', progress=0 WHERE id=?"),
-      setError:        db.prepare("UPDATE jobs SET status='error', error=? WHERE id=?"),
-      setCompleted:    db.prepare("UPDATE jobs SET status='completed', result_txt=?, result_srt=?, result_json=?, result_clean=?, duration_sec=?, completed_at=datetime('now'), progress=100 WHERE id=?"),
-      setProgressOnly: db.prepare("UPDATE jobs SET progress=?, progress_msg=? WHERE id=?"),
-      setStatusProc:   db.prepare("UPDATE jobs SET status='processing' WHERE id=?"),
-      getJobWithUser:  db.prepare("SELECT j.*, u.email, u.name FROM jobs j JOIN users u ON j.user_id=u.id WHERE j.id=?"),
-      getJob:          db.prepare("SELECT * FROM jobs WHERE id=?"),
-      getQueued:       db.prepare("SELECT j.*, u.email as user_email, u.name as user_name FROM jobs j JOIN users u ON j.user_id = u.id WHERE j.status='queued' ORDER BY j.created_at ASC LIMIT 1"),
-      getNextQueued:   db.prepare("SELECT id FROM jobs WHERE status='queued' ORDER BY created_at ASC LIMIT 1"),
-      countQueued:     db.prepare("SELECT COUNT(*) as cnt FROM jobs WHERE status='queued'"),
-      getStuck:        db.prepare("SELECT id FROM jobs WHERE status='processing'"),
-      recoverStuck:    db.prepare("UPDATE jobs SET status='queued', progress=0 WHERE status='processing'"),
-      insertSession:   db.prepare("INSERT INTO gpu_sessions (id, unshelve_at, trigger_type, status) VALUES (?, datetime('now'), 'auto', 'active')"),
-      closeSession:    db.prepare("UPDATE gpu_sessions SET shelve_at=datetime('now'), duration_sec=CAST((julianday(datetime('now')) - julianday(unshelve_at)) * 86400 AS REAL), jobs_count=?, job_ids=?, status='closed' WHERE id=?"),
-      setRating:       db.prepare("UPDATE jobs SET rating = ? WHERE id = ?"),
-    };
-  }
-  return _stmts;
-}
-
-// ═══════════════════════════════════════════════════
-// Конфигурация (из env)
+// Config
 // ═══════════════════════════════════════════════════
 
-const GPU_SSH_HOST   = process.env.GPU_SSH_HOST   || 'ubuntu@195.209.214.7';
-const GPU_SSH_KEY    = process.env.GPU_SSH_KEY     || '/root/.ssh/id_ed25519';
-const GPU_WORK_DIR   = process.env.GPU_WORK_DIR   || '/tmp/transcribe_batch';
+const GPU_SSH_HOST    = process.env.GPU_SSH_HOST   || 'ubuntu@195.209.214.7';
+const GPU_SSH_KEY     = process.env.GPU_SSH_KEY    || '/root/.ssh/id_ed25519';
+const GPU_WORK_DIR    = process.env.GPU_WORK_DIR   || '/tmp/transcribe_batch';
 const CALLBACK_SECRET = process.env.TRANSCRIBE_CALLBACK_SECRET || 'transcribe_cb_2026';
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || '';
 const APP_URL = process.env.APP_URL || 'https://transcribe.melki.top';
@@ -72,12 +32,11 @@ const CHUNK_SIZE = 15000;
 
 const SSH_OPTS = `-i ${GPU_SSH_KEY} -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o ServerAliveInterval=30`;
 
-// Таймауты
-const GPU_UNSHELVE_TIMEOUT = 240000;   // 4 мин ожидание unshelve
-const GPU_SERVICES_TIMEOUT = 120000;   // 2 мин ожидание сервисов
-const JOB_TIMEOUT          = 7200000;  // 2 часа макс на одно задание
+const GPU_UNSHELVE_TIMEOUT = 240000;
+const GPU_SERVICES_TIMEOUT = 120000;
+const JOB_TIMEOUT          = 7200000;
 const SCP_TIMEOUT          = 600000;
-const LAUNCH_TIMEOUT       = 300000;   // 5 мин ожидание started callback   // 10 мин на SCP
+const LAUNCH_TIMEOUT       = 300000;
 
 // ═══════════════════════════════════════════════════
 // State
@@ -95,20 +54,47 @@ function log(msg) {
   console.log(`[${ts}] [pipeline] ${msg}`);
 }
 
+// ═══════════════════════════════════════════════════
+// DB helpers (shorthand wrappers)
+// ═══════════════════════════════════════════════════
 
-function setProgressMsg(jobId, msg, progress) {
+async function setProgressMsg(jobId, msg, progress) {
   try {
     if (progress !== undefined) {
-      stmts().setProgress.run(msg, progress, jobId);
+      await dbRun('UPDATE transcribe_jobs SET progress_msg=?, progress=? WHERE id=?', [msg, progress, jobId]);
     } else {
-      stmts().setProgressMsg.run(msg, jobId);
+      await dbRun('UPDATE transcribe_jobs SET progress_msg=? WHERE id=?', [msg, jobId]);
     }
   } catch(_) {}
 }
 
+async function getJobWithUser(jobId) {
+  return dbGet(
+    'SELECT j.*, u.email, u.name FROM transcribe_jobs j JOIN transcribe_users u ON j.user_id=u.id WHERE j.id=?',
+    [jobId]
+  );
+}
+
+async function getJob(jobId) {
+  return dbGet('SELECT * FROM transcribe_jobs WHERE id=?', [jobId]);
+}
+
+async function getQueued() {
+  return dbGet(
+    'SELECT j.*, u.email as user_email, u.name as user_name FROM transcribe_jobs j JOIN transcribe_users u ON j.user_id = u.id WHERE j.status=\'queued\' ORDER BY j.created_at ASC LIMIT 1'
+  );
+}
+
+async function getNextQueued() {
+  return dbGet("SELECT id FROM transcribe_jobs WHERE status='queued' ORDER BY created_at ASC LIMIT 1");
+}
+
+async function countQueued() {
+  return dbGet("SELECT COUNT(*)::int as cnt FROM transcribe_jobs WHERE status='queued'");
+}
 
 // ═══════════════════════════════════════════════════
-// GPU Management (OpenStack) — переиспользуем из admin.js
+// GPU Management — reuse from admin.js
 // ═══════════════════════════════════════════════════
 
 let _adminModule = null;
@@ -117,14 +103,8 @@ function getAdmin() {
   return _adminModule;
 }
 
-async function gpuGetStatus() {
-  return await getAdmin().gpuGetStatus();
-}
-
-async function gpuDoAction(action) {
-  return await getAdmin().gpuDoAction(action);
-}
-
+async function gpuGetStatus() { return getAdmin().gpuGetStatus(); }
+async function gpuDoAction(action) { return getAdmin().gpuDoAction(action); }
 
 // ═══════════════════════════════════════════════════
 // SSH / SCP helpers
@@ -133,7 +113,7 @@ async function gpuDoAction(action) {
 async function sshExec(cmd, timeout = 30000) {
   const full = `ssh ${SSH_OPTS} ${GPU_SSH_HOST} "${cmd.replace(/"/g, '\\"')}"`;
   try {
-    const { stdout, stderr } = await execAsync(full, { timeout });
+    const { stdout } = await execAsync(full, { timeout });
     return stdout.trim();
   } catch (e) {
     throw new Error(`SSH failed: ${e.message}`);
@@ -150,19 +130,15 @@ async function scpFrom(remotePath, localPath) {
   await execAsync(cmd, { timeout: SCP_TIMEOUT });
 }
 
-
 // ═══════════════════════════════════════════════════
 // GPU lifecycle
 // ═══════════════════════════════════════════════════
 
 async function ensureGpuActive() {
   let status;
-  try {
-    status = await gpuGetStatus();
-  } catch (e) {
+  try { status = await gpuGetStatus(); } catch (e) {
     throw new Error(`GPU status check failed: ${e.message}`);
   }
-
   log(`GPU status: ${typeof status === 'string' ? status : JSON.stringify(status)}`);
   const st = typeof status === 'string' ? status : (status?.status || 'UNKNOWN');
 
@@ -171,7 +147,6 @@ async function ensureGpuActive() {
   if (st.includes('SHELVED')) {
     log('Unshelving GPU...');
     await gpuDoAction('unshelve');
-
     const deadline = Date.now() + GPU_UNSHELVE_TIMEOUT;
     while (Date.now() < deadline) {
       await sleep(10000);
@@ -179,10 +154,7 @@ async function ensureGpuActive() {
         const s = await gpuGetStatus();
         const cur = typeof s === 'string' ? s : (s?.status || '');
         log(`  GPU: ${cur}`);
-        if (cur === 'ACTIVE') {
-          await sleep(30000); // ждём старт сервисов
-          return;
-        }
+        if (cur === 'ACTIVE') { await sleep(30000); return; }
       } catch (_) {}
     }
     throw new Error('GPU не проснулся за 4 минуты');
@@ -196,10 +168,7 @@ async function checkGpuServices() {
   while (Date.now() < deadline) {
     try {
       const out = await sshExec('curl -s http://localhost:8002/health', 10000);
-      if (out === 'ok') {
-        log('GPU diarize: OK');
-        return;
-      }
+      if (out === 'ok') { log('GPU diarize: OK'); return; }
     } catch (_) {}
     log('  Diarize not ready, waiting...');
     await sleep(10000);
@@ -209,12 +178,8 @@ async function checkGpuServices() {
 
 async function shelveGpu() {
   try {
-    // Проверяем, нет ли ещё заданий в очереди
-    const pending = stmts().countQueued.get();
-    if (pending.cnt > 0) {
-      log(`Queue has ${pending.cnt} more jobs — GPU stays active`);
-      return false;
-    }
+    const pending = await countQueued();
+    if (pending.cnt > 0) { log(`Queue has ${pending.cnt} more jobs — GPU stays active`); return false; }
     log('Queue empty — shelving GPU');
     await gpuDoAction('shelve');
     logEvent('gpu.shelve', null, null, { trigger: 'pipeline_auto' }, 'pipeline');
@@ -225,27 +190,34 @@ async function shelveGpu() {
   }
 }
 
-
 // ═══════════════════════════════════════════════════
 // GPU session tracking
 // ═══════════════════════════════════════════════════
 
-function gpuSessionStart() {
+async function gpuSessionStart() {
   const sid = uuidv4();
   currentSessionId = sid;
   processedInSession = [];
   try {
-    stmts().insertSession.run(sid);
+    await dbRun("INSERT INTO transcribe_gpu_sessions (id, unshelve_at, trigger_type, status) VALUES (?, NOW(), 'auto', 'active')", [sid]);
     log(`GPU session: ${sid.slice(0, 8)}`);
   } catch (e) {
     log(`Session start error: ${e.message}`);
   }
 }
 
-function gpuSessionEnd() {
+async function gpuSessionEnd() {
   if (!currentSessionId) return;
   try {
-    stmts().closeSession.run(processedInSession.length, JSON.stringify(processedInSession), currentSessionId);
+    await dbRun(
+      `UPDATE transcribe_gpu_sessions SET
+         shelve_at=NOW(),
+         duration_sec=EXTRACT(EPOCH FROM (NOW() - unshelve_at)),
+         jobs_count=$1, job_ids=$2,
+         status='closed'
+       WHERE id=$3`,
+      [processedInSession.length, JSON.stringify(processedInSession), currentSessionId]
+    );
     log(`GPU session closed: ${currentSessionId.slice(0, 8)}, jobs=${processedInSession.length}`);
   } catch (e) {
     log(`Session end error: ${e.message}`);
@@ -254,29 +226,19 @@ function gpuSessionEnd() {
   processedInSession = [];
 }
 
-
 // ═══════════════════════════════════════════════════
 // Queue management
 // ═══════════════════════════════════════════════════
 
-/**
- * Вызывается из jobs.js после загрузки файла
- */
 function enqueueJob(jobId) {
   log(`Enqueued: ${jobId}`);
   setTimeout(processQueue, 500);
 }
 
 async function processQueue() {
-  if (gpuBusy) {
-    log('GPU busy, queue check deferred');
-    return;
-  }
-
-  const job = stmts().getQueued.get();
-
+  if (gpuBusy) { log('GPU busy, queue check deferred'); return; }
+  const job = await getQueued();
   if (!job) return;
-
   await startJob(job);
 }
 
@@ -284,32 +246,27 @@ async function startJob(job) {
   gpuBusy = true;
   currentJobId = job.id;
 
-  stmts().setProcessing.run(job.id);
+  await dbRun("UPDATE transcribe_jobs SET status='processing', progress=0 WHERE id=?", [job.id]);
   logEvent('job.processing', job.id, job.user_id, { stage: 'gpu_pipeline' }, 'pipeline');
   log(`Starting: ${job.id} (${job.original_name})`);
-  setProgressMsg(job.id, 'Подготовка GPU...', 0);
+  await setProgressMsg(job.id, 'Подготовка GPU...', 0);
 
   try {
-    // 1. GPU
     await ensureGpuActive();
-    if (!currentSessionId) gpuSessionStart();
-    setProgressMsg(job.id, 'Проверка сервисов GPU...', 5);
+    if (!currentSessionId) await gpuSessionStart();
+    await setProgressMsg(job.id, 'Проверка сервисов GPU...', 5);
 
-    // 2. Services
     await checkGpuServices();
 
-    // 3. SCP file to GPU
     const localPath = path.join(UPLOAD_PATH, job.filename);
-    if (!fs.existsSync(localPath)) {
-      throw new Error(`File not found: ${localPath}`);
-    }
+    if (!fs.existsSync(localPath)) throw new Error(`File not found: ${localPath}`);
+
     const remotePath = `${GPU_WORK_DIR}/${job.filename}`;
     await sshExec(`mkdir -p ${GPU_WORK_DIR}`, 10000);
-    setProgressMsg(job.id, 'Загрузка файла на GPU...', 10);
+    await setProgressMsg(job.id, 'Загрузка файла на GPU...', 10);
     log(`SCP → GPU: ${job.filename}`);
     await scpTo(localPath, remotePath);
 
-    // 4. Launch gpu_wrapper
     const resultDir = `/tmp/transcribe_results/${job.id}`;
     const callbackUrl = `${APP_URL}/api/internal/callback/transcribe/${job.id}`;
 
@@ -318,7 +275,6 @@ async function startJob(job) {
     if (job.max_speakers) tCmd += ` --max-speakers ${job.max_speakers}`;
     if (job.noise_filter) tCmd += ` --noise-filter ${job.noise_filter}`;
 
-    // Экранируем для SSH
     const escapedCmd = tCmd.replace(/'/g, "'\\''");
     const escapedUrl = callbackUrl.replace(/'/g, "'\\''");
     const wrapperCmd = [
@@ -334,20 +290,18 @@ async function startJob(job) {
 
     await sshExec(wrapperCmd, 15000);
     log(`GPU wrapper launched for ${job.id}`);
-    setProgressMsg(job.id, job.diarize ? 'Диаризация...' : 'Транскрипция...', 15);
+    await setProgressMsg(job.id, job.diarize ? 'Диаризация...' : 'Транскрипция...', 15);
     logEvent('job.gpu_launched', job.id, job.user_id, {}, 'pipeline');
 
-    // 5a. Launch timeout — если started не придёт за 5 мин
     if (launchTimeoutTimer) clearTimeout(launchTimeoutTimer);
-    launchTimeoutTimer = setTimeout(() => handleLaunchTimeout(job.id), LAUNCH_TIMEOUT);
+    launchTimeoutTimer = setTimeout(() => handleLaunchTimeout(job.id).catch(e => log('launch timeout error: ' + e.message)), LAUNCH_TIMEOUT);
 
-    // 5. Fallback timeout
     if (jobTimeoutTimer) clearTimeout(jobTimeoutTimer);
-    jobTimeoutTimer = setTimeout(() => handleTimeout(job.id), JOB_TIMEOUT);
+    jobTimeoutTimer = setTimeout(() => handleTimeout(job.id).catch(e => log('job timeout error: ' + e.message)), JOB_TIMEOUT);
 
   } catch (e) {
     log(`Launch failed: ${e.message}`);
-    stmts().setError.run(e.message, job.id);
+    await dbRun("UPDATE transcribe_jobs SET status='error', error=? WHERE id=?", [e.message, job.id]);
     logEvent('job.error', job.id, job.user_id, { error: e.message, stage: 'launch' }, 'pipeline');
     gpuBusy = false;
     currentJobId = null;
@@ -355,14 +309,10 @@ async function startJob(job) {
   }
 }
 
-
 // ═══════════════════════════════════════════════════
 // Callback handlers
 // ═══════════════════════════════════════════════════
 
-/**
- * Вызывается из internal.js при получении callback от gpu_wrapper
- */
 async function handleCallback(jobId, payload) {
   const { type } = payload;
 
@@ -370,11 +320,14 @@ async function handleCallback(jobId, payload) {
     case 'started':
       log(`Callback started: ${jobId} (pid=${payload.pid})`);
       if (launchTimeoutTimer) { clearTimeout(launchTimeoutTimer); launchTimeoutTimer = null; }
-      stmts().setStatusProc.run(jobId);
+      await dbRun("UPDATE transcribe_jobs SET status='processing' WHERE id=?", [jobId]);
       break;
 
     case 'progress':
-      stmts().setProgressOnly.run(payload.progress || 0, payload.message || 'Обработка...', jobId);
+      await dbRun(
+        'UPDATE transcribe_jobs SET progress=?, progress_msg=? WHERE id=?',
+        [payload.progress || 0, payload.message || 'Обработка...', jobId]
+      );
       break;
 
     case 'done':
@@ -394,17 +347,11 @@ async function handleCallback(jobId, payload) {
   }
 }
 
-
 async function handleDone(jobId, payload) {
-  const job = stmts().getJobWithUser.get(jobId);
-  if (!job) {
-    log(`Job not found: ${jobId}`);
-    finishJob(jobId);
-    return;
-  }
+  const job = await getJobWithUser(jobId);
+  if (!job) { log(`Job not found: ${jobId}`); await finishJob(jobId); return; }
 
   try {
-    // 1. SCP результаты с GPU (scp -r copies directory)
     const localResultDir = `/tmp/transcribe_results/${jobId}`;
     if (fs.existsSync(localResultDir)) fs.rmSync(localResultDir, { recursive: true, force: true });
     fs.mkdirSync('/tmp/transcribe_results', { recursive: true });
@@ -413,7 +360,6 @@ async function handleDone(jobId, payload) {
     await scpFrom(remoteResultDir, '/tmp/transcribe_results/');
     log(`Results downloaded: ${jobId}`);
 
-    // 2. Читаем файлы
     const readFile = (name) => {
       const p = path.join(localResultDir, name);
       return fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : '';
@@ -427,18 +373,19 @@ async function handleDone(jobId, payload) {
     let meta = {};
     try { meta = JSON.parse(metaRaw); } catch (_) {}
 
-    // 3. Claude summary
-    setProgressMsg(jobId, 'Генерация саммари...', 85);
+    await setProgressMsg(jobId, 'Генерация саммари...', 85);
     log(`Claude summary: ${jobId} (${resultClean.length} chars)`);
     const summary = await generateSummary(resultClean, job.prompt_text);
     const timestamp = new Date().toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' });
     const resultTxt = `Обработано: ${timestamp}\n${'═'.repeat(60)}\n${summary}`;
     log(`Summary done: ${summary.length} chars`);
 
-    // 4. DB update
-    stmts().setCompleted.run(resultTxt, resultSrt, resultJson, resultClean, meta.duration_sec || null, jobId);
+    await dbRun(
+      "UPDATE transcribe_jobs SET status='completed', result_txt=?, result_srt=?, result_json=?, result_clean=?, duration_sec=?, completed_at=NOW(), progress=100 WHERE id=?",
+      [resultTxt, resultSrt, resultJson, resultClean, meta.duration_sec || null, jobId]
+    );
+    await setProgressMsg(jobId, 'Готово', 100);
 
-    setProgressMsg(jobId, 'Готово', 100);
     logEvent('job.completed', jobId, job.user_id, {
       original_name: job.original_name,
       duration_sec: meta.duration_sec,
@@ -446,7 +393,6 @@ async function handleDone(jobId, payload) {
       has_srt: !!resultSrt,
     }, 'pipeline');
 
-    // 5. Email
     if (job.email) {
       sendEmail(job.email, 'Транскрипция готова!', `
         <h2>Привет, ${escapeHtml(job.name)}!</h2>
@@ -457,75 +403,86 @@ async function handleDone(jobId, payload) {
     }
 
     log(`Job completed: ${jobId}`);
-    try { sendToQdrant({ job_id: jobId, text: resultClean || resultTxt, source: 'transcribe', username: job.name, original_name: job.original_name, created_at: job.created_at }); } catch(_e) { log('[qdrant] '+_e.message); }
+    try {
+      sendToQdrant({ job_id: jobId, text: resultClean || resultTxt, source: 'transcribe', username: job.name, original_name: job.original_name, created_at: job.created_at });
+    } catch(_e) { log('[qdrant] ' + _e.message); }
 
-    // 6. Cleanup
     fs.rmSync(localResultDir, { recursive: true, force: true });
     sshExec(`rm -rf ${remoteResultDir}`, 10000).catch(() => {});
 
   } catch (e) {
     log(`handleDone error: ${e.message}`);
-    stmts().setError.run(`Post-processing: ${e.message}`, jobId);
+    await dbRun("UPDATE transcribe_jobs SET status='error', error=? WHERE id=?", [`Post-processing: ${e.message}`, jobId]);
     logEvent('job.error', jobId, job.user_id, { error: e.message, stage: 'post_processing' }, 'pipeline');
   }
 
-  finishJob(jobId);
+  await finishJob(jobId);
 }
 
-
 async function handleError(jobId, payload) {
-  const job = stmts().getJob.get(jobId);
+  const job = await getJob(jobId);
   if (job) {
-    stmts().setError.run(payload.message || 'GPU processing error', jobId);
+    await dbRun("UPDATE transcribe_jobs SET status='error', error=? WHERE id=?", [payload.message || 'GPU processing error', jobId]);
     logEvent('job.error', jobId, job.user_id, {
       error: payload.message,
       exit_code: payload.exit_code,
       elapsed_sec: payload.elapsed_sec,
     }, 'pipeline');
   }
-  finishJob(jobId);
+  await finishJob(jobId);
 }
 
-
-function handleLaunchTimeout(jobId) {
-  log('LAUNCH TIMEOUT: ' + jobId + ' — no started callback in 5 min');
-  const job = stmts().getJob.get(jobId);
+async function handleLaunchTimeout(jobId) {
+  log('LAUNCH TIMEOUT: ' + jobId);
+  const job = await getJob(jobId);
   if (job && job.status === 'processing') {
-    stmts().setError.run('Launch timeout: GPU wrapper не ответил за 5 мин', jobId);
+    await dbRun("UPDATE transcribe_jobs SET status='error', error=? WHERE id=?", ['Launch timeout: GPU wrapper не ответил за 5 мин', jobId]);
     logEvent('job.error', jobId, job.user_id, { error: 'launch_timeout' }, 'pipeline');
   }
-  finishJob(jobId);
+  await finishJob(jobId);
 }
 
-
-function handleTimeout(jobId) {
-  log(`TIMEOUT: ${jobId} — no callback in ${JOB_TIMEOUT / 60000} min`);
-  const job = stmts().getJob.get(jobId);
+async function handleTimeout(jobId) {
+  log(`TIMEOUT: ${jobId}`);
+  const job = await getJob(jobId);
   if (job && job.status === 'processing') {
-    stmts().setError.run('Timeout: GPU не ответил', jobId);
+    await dbRun("UPDATE transcribe_jobs SET status='error', error=? WHERE id=?", ['Timeout: GPU не ответил', jobId]);
     logEvent('job.error', jobId, job.user_id, { error: 'timeout' }, 'pipeline');
   }
-  finishJob(jobId);
+  await finishJob(jobId);
 }
-
 
 async function finishJob(jobId) {
   processedInSession.push(jobId);
   gpuBusy = false;
   currentJobId = null;
 
-  // Следующее задание в очереди?
-  const next = stmts().getNextQueued.get();
+  const next = await getNextQueued();
   if (next) {
     log(`Next in queue: ${next.id}`);
     setTimeout(processQueue, 2000);
   } else {
-    // Очередь пуста — shelve GPU
-    gpuSessionEnd();
+    await gpuSessionEnd();
     await shelveGpu();
   }
 }
 
+// ═══════════════════════════════════════════════════
+// Recovery
+// ═══════════════════════════════════════════════════
+
+async function recoverOnStartup() {
+  try {
+    const stuck = await dbAll("SELECT id FROM transcribe_jobs WHERE status='processing'");
+    if (stuck.length > 0) {
+      log(`Recovery: ${stuck.length} stuck jobs → queued`);
+      await dbRun("UPDATE transcribe_jobs SET status='queued', progress=0 WHERE status='processing'");
+      setTimeout(processQueue, 10000);
+    }
+  } catch (e) {
+    log(`Recovery error: ${e.message}`);
+  }
+}
 
 // ═══════════════════════════════════════════════════
 // Claude API summary
@@ -555,45 +512,28 @@ const DEFAULT_SYSTEM_PROMPT = `Ты — программа-конспектир�
 - Сохраняй имена и факты точно
 - Язык — русский`;
 
-
 function smartSample(text) {
   const total = text.length;
   if (total <= CHUNK_SIZE * 3) return text;
-
   const start = text.slice(0, CHUNK_SIZE);
   const midPos = Math.floor(total / 2 - CHUNK_SIZE / 2);
   const middle = text.slice(midPos, midPos + CHUNK_SIZE);
   const end = text.slice(-CHUNK_SIZE);
-
-  return (
-    '=== НАЧАЛО ЗАПИСИ ===\n' + start +
-    '\n\n=== СЕРЕДИНА ЗАПИСИ ===\n' + middle +
-    '\n\n=== КОНЕЦ ЗАПИСИ ===\n' + end
-  );
+  return '=== НАЧАЛО ЗАПИСИ ===\n' + start + '\n\n=== СЕРЕДИНА ЗАПИСИ ===\n' + middle + '\n\n=== КОНЕЦ ЗАПИСИ ===\n' + end;
 }
 
-
 async function generateSummary(cleanText, promptText) {
-  if (!ANTHROPIC_API_KEY) {
-    return '(саммари не создано — нет ANTHROPIC_API_KEY)';
-  }
-  if (!cleanText || cleanText.length < 50) {
-    return '(текст слишком короткий для саммари)';
-  }
+  if (!ANTHROPIC_API_KEY) return '(саммари не создано — нет ANTHROPIC_API_KEY)';
+  if (!cleanText || cleanText.length < 50) return '(текст слишком короткий для саммари)';
 
   const sampled = smartSample(cleanText);
   log(`Claude API: ${cleanText.length} → ${sampled.length} символов`);
-
   const systemPrompt = promptText || DEFAULT_SYSTEM_PROMPT;
 
   try {
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01',
-      },
+      headers: { 'Content-Type': 'application/json', 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
       body: JSON.stringify({
         model: CLAUDE_MODEL,
         max_tokens: 2000,
@@ -609,59 +549,17 @@ async function generateSummary(cleanText, promptText) {
     }
 
     const data = await response.json();
-    const text = data.content
-      .filter(c => c.type === 'text')
-      .map(c => c.text)
-      .join('\n')
-      .trim();
-
-    return text || '(пустой ответ Claude)';
+    return data.content.filter(c => c.type === 'text').map(c => c.text).join('\n').trim() || '(пустой ответ Claude)';
   } catch (e) {
     log(`Claude error: ${e.message}`);
     return `(ошибка Claude API: ${e.message})`;
   }
 }
 
-
 // ═══════════════════════════════════════════════════
-// Recovery (при перезапуске сервера)
-// ═══════════════════════════════════════════════════
-
-function recoverOnStartup() {
-  // Задания в processing → вернуть в queued
-  // (gpu_wrapper на GPU может быть ещё жив — но лучше переподать)
-  const stuck = stmts().getStuck.all();
-  if (stuck.length > 0) {
-    log(`Recovery: ${stuck.length} stuck jobs → queued`);
-    stmts().recoverStuck.run();
-    setTimeout(processQueue, 10000);
-  }
-}
-
-
-// ═══════════════════════════════════════════════════
-// Utils
+// Qdrant
 // ═══════════════════════════════════════════════════
 
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-function getCallbackSecret() {
-  return CALLBACK_SECRET;
-}
-
-function isGpuBusy() {
-  return gpuBusy;
-}
-
-
-// ═══════════════════════════════════════════════════
-// Exports
-// ═══════════════════════════════════════════════════
-
-
-// ── Qdrant indexing (fire-and-forget, chunked) ─────────────
 function chunkText(text, chunkSize = 2000, overlap = 200) {
   const chunks = [];
   let start = 0;
@@ -704,18 +602,18 @@ function sendToQdrant({ job_id, text, source, username, original_name, created_a
   if (!chunks.length) return;
   chunks.forEach((chunk, i) => {
     setTimeout(() => {
-      sendChunkToQdrant({ job_id, chunk, chunk_idx: i, total_chunks: chunks.length,
-                          source, username, original_name, created_at });
+      sendChunkToQdrant({ job_id, chunk, chunk_idx: i, total_chunks: chunks.length, source, username, original_name, created_at });
     }, i * 300);
   });
   log(`[qdrant] ${source}#${job_id}: ${chunks.length} chunks queued`);
 }
 
-module.exports = {
-  enqueueJob,
-  processQueue,
-  handleCallback,
-  recoverOnStartup,
-  getCallbackSecret,
-  isGpuBusy,
-};
+// ═══════════════════════════════════════════════════
+// Utils
+// ═══════════════════════════════════════════════════
+
+function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+function getCallbackSecret() { return CALLBACK_SECRET; }
+function isGpuBusy() { return gpuBusy; }
+
+module.exports = { enqueueJob, processQueue, handleCallback, recoverOnStartup, getCallbackSecret, isGpuBusy };
