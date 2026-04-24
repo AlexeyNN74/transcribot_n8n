@@ -142,6 +142,41 @@ router.get('/', authMiddleware, async (req, res) => {
   res.json(jobs);
 });
 
+
+// ===== PROJECTS (from Qdrant) =====
+router.get('/projects', authMiddleware, async (req, res) => {
+  try {
+    const username = req.user.name || req.user.email;
+    const body = JSON.stringify({
+      filter: { must: [{ key: 'username', match: { value: username } }] },
+      with_payload: ['project'],
+      limit: 1000
+    });
+    const http = require('http');
+    const data = await new Promise((resolve, reject) => {
+      const req2 = http.request({
+        hostname: 'qdrant', port: 6333,
+        path: '/collections/melki_knowledge/points/scroll',
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }
+      }, (r) => {
+        let d = '';
+        r.on('data', c => d += c);
+        r.on('end', () => { try { resolve(JSON.parse(d)); } catch(e) { reject(e); } });
+      });
+      req2.on('error', reject);
+      req2.write(body);
+      req2.end();
+    });
+    const pts = data.result?.points || [];
+    const projects = [...new Set(pts.map(p => p.payload?.project).filter(Boolean))].sort();
+    res.json({ projects: projects.length ? projects : ['default'] });
+  } catch (e) {
+    console.error('[projects]', e.message);
+    res.json({ projects: ['default'] });
+  }
+});
+
 router.get('/:id', authMiddleware, async (req, res) => {
   const job = await dbGet('SELECT * FROM transcribe_jobs WHERE id = ? AND user_id = ?', [req.params.id, req.user.id]);
   if (!job) return res.status(404).json({ error: 'Задание не найдено' });

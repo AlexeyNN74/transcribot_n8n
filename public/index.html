@@ -834,6 +834,12 @@
           <li><a onclick="showTab('profiles')" id="tab-profiles-link">🎛️ Мои профили</a></li>
           <li id="admin-menu-item" style="display:none"><a onclick="showTab('admin')" id="tab-admin-link">⚙️ Администрирование</a></li>
         </ul>
+        <div style="margin-top:20px;padding-top:16px;border-top:1px solid var(--border)">
+          <div style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--text2);margin-bottom:8px;padding:0 8px">Проекты</div>
+          <ul class="sidebar-nav" id="proj-nav-list">
+            <li><a class="active" onclick="setActiveProject(null)">Все задания</a></li>
+          </ul>
+        </div>
       </div>
 
       <div class="main-content">
@@ -1241,7 +1247,7 @@ function showTab(tab) {
 
   if (tab === 'upload') loadPromptsForUpload();
   if (tab === 'profiles') loadProfiles();
-  if (tab === 'jobs') loadJobs();
+  if (tab === 'jobs') { loadJobs(); loadProjects(); }
   if (tab === 'admin') loadAdminData();
 }
 
@@ -2087,14 +2093,14 @@ async function indexSelectedToKB() {
   const ids = [...selectedJobIds];
   if (!ids.length) return;
   const btn = document.getElementById('batch-kb-btn');
-  const _kbProject = prompt('В какой проект сохранить?', 'default');
+  const _kbProject = await pickProject();
   if (_kbProject === null) { btn.disabled = false; return; }
   btn.disabled = true;
   btn.textContent = '⏳ 0/' + ids.length;
   let done = 0, errors = 0;
   for (const id of ids) {
     try {
-      await api('POST', `/api/jobs/${id}/index-to-kb`, { project: _kbProject.trim() || 'default' });
+      await api('POST', `/api/jobs/${id}/index-to-kb`, { project: _kbProject });
       done++;
     } catch(e) {
       errors++;
@@ -2110,9 +2116,9 @@ async function indexToKB(jobId, btn) {
   const origDisabled = btn ? btn.disabled : false;
   if (btn) { btn.disabled = true; btn.textContent = '⏳'; }
   try {
-    const project = prompt('В какой проект сохранить?', 'default');
+    const project = await pickProject();
     if (project === null) { if (btn) { btn.textContent = origText; btn.disabled = origDisabled; } return; }
-    const data = await api('POST', `/api/jobs/${jobId}/index-to-kb`, { project: project.trim() || 'default' });
+    const data = await api('POST', `/api/jobs/${jobId}/index-to-kb`, { project });
     if (btn) { btn.textContent = '✅'; setTimeout(() => { btn.textContent = origText; btn.disabled = origDisabled; }, 2000); }
   } catch(e) {
     if (btn) { btn.textContent = '❌'; setTimeout(() => { btn.textContent = origText; btn.disabled = origDisabled; }, 2000); }
@@ -2135,6 +2141,83 @@ async function downloadFile(jobId, format) {
   a.href = url; a.download = filename;
   document.body.appendChild(a); a.click();
   document.body.removeChild(a); URL.revokeObjectURL(url);
+}
+
+
+// ===== PROJECTS SIDEBAR =====
+
+let activeProject = (function() {
+  try { return localStorage.getItem('active_project') || null; } catch(e) { return null; }
+})();
+
+async function loadProjects() {
+  try {
+    const cached = JSON.parse(localStorage.getItem('kb_projects') || '[]');
+    const r = await api('GET', '/api/jobs/projects');
+    const api_projects = r.projects || [];
+    const all = [...new Set([...api_projects, ...cached])].filter(p => p && p !== 'default').sort();
+    const list = document.getElementById('proj-nav-list');
+    if (!list) return;
+    list.innerHTML = '<li><a class="' + (!activeProject ? 'active' : '') + '" onclick="setActiveProject(null)">Все задания</a></li>'
+      + all.map(p => '<li><a class="' + (activeProject===p ? 'active' : '') + '" onclick="setActiveProject(\'' + p.replace(/'/g,"\\'") + '\')">' + p + '</a></li>').join('');
+  } catch(e) {}
+}
+
+function setActiveProject(p) {
+  activeProject = p;
+  window.activeProject = p;
+  try {
+    if (p) localStorage.setItem('active_project', p);
+    else localStorage.removeItem('active_project');
+  } catch(e) {}
+  loadProjects();
+}
+
+function pickProject() {
+  return new Promise(async (resolve) => {
+    let projects = ['default'];
+    try {
+      const cached = JSON.parse(localStorage.getItem('kb_projects') || '[]');
+      const r = await api('GET', '/api/jobs/projects');
+      const api_p = r.projects || [];
+      projects = [...new Set([...api_p, ...cached])].filter(Boolean).sort();
+      if (!projects.includes('default')) projects.unshift('default');
+    } catch(e) {
+      try {
+        const cached = JSON.parse(localStorage.getItem('kb_projects') || '[]');
+        if (cached.length) projects = [...new Set(['default', ...cached])].sort();
+      } catch(e2) {}
+    }
+    const preselect = activeProject || 'default';
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:9999;display:flex;align-items:center;justify-content:center';
+    const opts = projects.map(p => '<option value="' + p + '"' + (p===preselect?' selected':'') + '>' + p + '</option>').join('') + '<option value="__new__">+ Новый проект...</option>';
+    overlay.innerHTML = '<div style="background:#13131a;border:1px solid #2a2a3d;border-radius:12px;padding:24px;min-width:280px;max-width:360px;box-shadow:0 8px 32px rgba(0,0,0,.6)">'
+      + '<div style="font-size:15px;font-weight:600;margin-bottom:16px;color:#e8e8f0">&#129504; В базу знаний</div>'
+      + '<div style="font-size:12px;color:#8888aa;margin-bottom:6px">Выберите проект</div>'
+      + '<select id="kb-sel" style="width:100%;padding:8px;background:#0a0a0f;border:1px solid #2a2a3d;border-radius:8px;color:#e8e8f0;font-size:14px;margin-bottom:10px">' + opts + '</select>'
+      + '<input id="kb-new" type="text" placeholder="Название нового проекта" style="width:100%;padding:8px;background:#0a0a0f;border:1px solid #2a2a3d;border-radius:8px;color:#e8e8f0;font-size:14px;margin-bottom:16px;display:none;box-sizing:border-box">'
+      + '<div style="display:flex;gap:8px;justify-content:flex-end">'
+      + '<button id="kb-cancel" style="padding:7px 16px;border:1px solid #2a2a3d;border-radius:8px;background:transparent;color:#e8e8f0;cursor:pointer">Отмена</button>'
+      + '<button id="kb-ok" style="padding:7px 16px;border:none;border-radius:8px;background:#6c63ff;color:#fff;font-weight:600;cursor:pointer">Сохранить</button>'
+      + '</div></div>';
+    document.body.appendChild(overlay);
+    const sel = overlay.querySelector('#kb-sel');
+    const inp = overlay.querySelector('#kb-new');
+    sel.onchange = () => { inp.style.display = sel.value === '__new__' ? 'block' : 'none'; };
+    overlay.querySelector('#kb-cancel').onclick = () => { document.body.removeChild(overlay); resolve(null); };
+    overlay.querySelector('#kb-ok').onclick = () => {
+      const val = sel.value === '__new__' ? inp.value.trim() : sel.value;
+      if (val && val !== 'default') {
+        try {
+          const s = JSON.parse(localStorage.getItem('kb_projects') || '[]');
+          if (!s.includes(val)) { s.push(val); localStorage.setItem('kb_projects', JSON.stringify(s)); }
+        } catch(e) {}
+      }
+      document.body.removeChild(overlay); resolve(val || 'default');
+    };
+    overlay.onclick = e => { if (e.target === overlay) { document.body.removeChild(overlay); resolve(null); } };
+  });
 }
 
 // ===== JOB MODAL =====
