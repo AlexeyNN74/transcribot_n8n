@@ -245,35 +245,61 @@ router.get('/events', async (req, res) => {
 
 // ===== BULK INDEX (md-файлы из CLI/скрипта) =====
 // Защищён INTERNAL_TOKEN. Принимает один документ за запрос
-// (несколько файлов = несколько запросов). Возвращает статус постановки в очередь.
+// (несколько файлов = несколько запросов). Два режима:
+//
+//   1. text: одним блоком — стандартное чанкование chunkText() в qdrant.js
+//   2. chunks: [{text, extra_payload?}] — заранее нарезанные блоки
+//      (например, поблочная нарезка профилей с метаданными flower_id, block_number)
+//
+// Поля: { username, project, source?, doc_id, original_name?, created_at?,
+//         text? | chunks? }
 router.post('/bulk-index', async (req, res) => {
   const token = req.headers['x-internal-token'];
   if (!token || token !== INTERNAL_TOKEN) return res.status(403).json({ error: 'Invalid internal token' });
 
-  const { username, project, source, doc_id, original_name, text, created_at } = req.body || {};
+  const { username, project, source, doc_id, original_name, text, chunks, created_at } = req.body || {};
   if (!username) return res.status(400).json({ error: 'username required' });
   if (!project)  return res.status(400).json({ error: 'project required' });
   if (!doc_id)   return res.status(400).json({ error: 'doc_id required' });
-  if (!text || !String(text).trim()) return res.status(400).json({ error: 'text required' });
+
+  const hasText = typeof text === 'string' && text.trim();
+  const hasChunks = Array.isArray(chunks) && chunks.length;
+  if (!hasText && !hasChunks) return res.status(400).json({ error: 'text or chunks required' });
+  if (hasText && hasChunks)   return res.status(400).json({ error: 'pass text OR chunks, not both' });
+
+  // Валидация chunks: каждый элемент должен иметь .text
+  if (hasChunks) {
+    for (let i = 0; i < chunks.length; i++) {
+      if (!chunks[i] || typeof chunks[i].text !== 'string') {
+        return res.status(400).json({ error: `chunks[${i}].text required` });
+      }
+    }
+  }
 
   // Псевдо-jobId для bulk = doc_id (он уникален). В transcribe_jobs запись НЕ создаём —
   // это импорт извне, не транскрипция. enqueueIndex попытается обновить kb_status в БД,
   // но WHERE id = ? просто ничего не найдёт — это нормально для bulk.
   try {
-    const result = await enqueueIndex({
+    const task = {
       jobId:         doc_id,
       source:        source || 'bulk',
-      text,
       username,
       project,
       doc_id,
       original_name: original_name || '',
       created_at:    created_at || new Date().toISOString(),
-    });
+    };
+    if (hasChunks) task.pre_chunks = chunks;
+    else           task.text = text;
+
+    const result = await enqueueIndex(task);
 
     logEvent('kb.bulk_indexed', null, null, {
       doc_id, project, username, source: source || 'bulk',
-      original_name: original_name || '', text_length: text.length,
+      original_name: original_name || '',
+      mode: hasChunks ? 'pre_chunked' : 'text',
+      chunks_count: hasChunks ? chunks.length : null,
+      text_length: hasText ? text.length : null,
     }, 'bulk').catch(() => {});
 
     res.json({ ok: true, doc_id, project, queue_position: result.position, duplicate: !!result.duplicate });

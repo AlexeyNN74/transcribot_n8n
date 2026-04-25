@@ -238,14 +238,28 @@ async function _processOne(task) {
   const t0 = Date.now();
 
   try {
-    // 1) Чанкование
-    const chunks = chunkText(task.text);
-    if (!chunks.length) {
-      log(`${docId}: empty text, marking 'none'`);
+    // 1) Чанкование — два режима:
+    //    A. pre_chunks — массив { text, extra_payload? } передан извне (bulk-import с поблочной нарезкой)
+    //    B. text — длинная строка, режем сами через chunkText()
+    let units;
+    if (Array.isArray(task.pre_chunks) && task.pre_chunks.length) {
+      units = task.pre_chunks
+        .map(u => ({
+          text: sanitizeText((u.text || '').trim()),
+          extra_payload: u.extra_payload || {},
+        }))
+        .filter(u => u.text.length >= 10);
+    } else {
+      const chunks = chunkText(task.text);
+      units = chunks.map(text => ({ text, extra_payload: {} }));
+    }
+
+    if (!units.length) {
+      log(`${docId}: empty text, marking error`);
       await dbRun(
         "UPDATE transcribe_jobs SET kb_status='error', kb_error=?, kb_chunks=0 WHERE id=?",
         ['Пустой текст', jobId]
-      );
+      ).catch(() => {});
       return;
     }
 
@@ -261,21 +275,24 @@ async function _processOne(task) {
 
     // 3) Эмбеддинги
     const embedder = getEmbedder();
-    const vectors = await embedder.embed(chunks);
+    const texts = units.map(u => u.text);
+    const vectors = await embedder.embed(texts);
 
-    // 4) Запись в Qdrant пакетом
+    // 4) Запись в Qdrant пакетом + extra_payload пользователя
     const indexedAt = new Date().toISOString();
-    const points = chunks.map((text, i) => ({
+    const points = units.map((u, i) => ({
       id: pointIdFor(docId, i),
       vector: vectors[i],
       payload: {
-        text,
+        // системные поля payload — последними побеждают
+        ...(u.extra_payload || {}),
+        text: u.text,
         source,
         username: task.username || 'unknown',
         project: task.project || 'default',
         doc_id: docId,
         chunk_idx: i,
-        total_chunks: chunks.length,
+        total_chunks: units.length,
         original_name: task.original_name || '',
         created_at: task.created_at || indexedAt,
         indexed_at: indexedAt,
@@ -284,14 +301,14 @@ async function _processOne(task) {
 
     await qdrant().upsert(QDRANT_COLLECTION, { points, wait: true });
 
-    // 5) Обновить БД
+    // 5) Обновить БД (если документ из transcribe_jobs — bulk-import не имеет записи в БД и просто проигнорируется)
     await dbRun(
       "UPDATE transcribe_jobs SET kb_status='done', kb_chunks=?, kb_indexed_at=NOW(), kb_error=NULL, project=COALESCE(?, project) WHERE id=?",
-      [chunks.length, task.project || null, jobId]
-    );
+      [units.length, task.project || null, jobId]
+    ).catch(() => {});
 
     const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
-    log(`${docId}: done ${chunks.length} chunks in ${elapsed}s`);
+    log(`${docId}: done ${units.length} chunks in ${elapsed}s`);
   } catch (e) {
     log(`${docId}: ERROR ${e.message}`);
     await dbRun(
@@ -318,13 +335,21 @@ async function _runWorker() {
 }
 
 /**
- * Поставить документ в очередь индексации.
- * Возвращает { queued: true, position: N } сразу.
- * task = { jobId, source, text, username, project, doc_id?, original_name, created_at }
+ * Поставить документ в очередь индексации. Возвращает { queued: true, position: N } сразу.
+ * Два режима:
+ *   - task.text: длинный текст, чанкуем сами стандартным chunkText()
+ *   - task.pre_chunks: массив { text, extra_payload? } — уже нарезанные чанки
+ *     (для bulk-import с поблочной нарезкой профилей и т.п.)
+ *
+ * Поля task: { jobId, source, text? | pre_chunks?, username, project, doc_id?, original_name, created_at }
  */
 async function enqueueIndex(task) {
   if (!task || !task.jobId) throw new Error('enqueueIndex: jobId required');
-  if (!task.text || !String(task.text).trim()) throw new Error('enqueueIndex: text required');
+  const hasText = task.text && String(task.text).trim();
+  const hasPreChunks = Array.isArray(task.pre_chunks) && task.pre_chunks.length;
+  if (!hasText && !hasPreChunks) {
+    throw new Error('enqueueIndex: text or pre_chunks required');
+  }
 
   // Проверка на дубль в очереди
   if (_queue.some(t => t.jobId === task.jobId)) {
@@ -431,17 +456,28 @@ async function searchKb(query, filters = {}, limit = 10) {
     with_vector: false,
   });
 
-  return (result || []).map(r => ({
-    score: r.score,
-    text: r.payload?.text || '',
-    source: r.payload?.source || '',
-    project: r.payload?.project || '',
-    doc_id: r.payload?.doc_id || '',
-    original_name: r.payload?.original_name || '',
-    created_at: r.payload?.created_at || null,
-    chunk_idx: r.payload?.chunk_idx ?? null,
-    total_chunks: r.payload?.total_chunks ?? null,
-  }));
+  return (result || []).map(r => {
+    const p = r.payload || {};
+    // Системные поля + любые extra_payload (block_*, flower_id, fm_*)
+    const out = {
+      score: r.score,
+      text: p.text || '',
+      source: p.source || '',
+      project: p.project || '',
+      doc_id: p.doc_id || '',
+      original_name: p.original_name || '',
+      created_at: p.created_at || null,
+      chunk_idx: p.chunk_idx ?? null,
+      total_chunks: p.total_chunks ?? null,
+    };
+    // Прокидываем дополнительные payload-поля целиком (block_*, flower_id, fm_*)
+    for (const k of Object.keys(p)) {
+      if (out.hasOwnProperty(k)) continue;
+      if (k === 'username' || k === 'indexed_at') continue;
+      out[k] = p[k];
+    }
+    return out;
+  });
 }
 
 // ═══════════════════════════════════════════════════
