@@ -42,6 +42,7 @@ app.use('/api/', limiter);
 app.use('/api/auth',     require('./routes/auth'));
 app.use('/api/prompts',  require('./routes/prompts'));
 app.use('/api/jobs',     require('./routes/jobs'));
+app.use('/api',          require('./routes/search'));
 app.use('/api/internal', require('./routes/internal'));
 app.use('/api/admin',    require('./routes/admin'));
 app.use('/api',          require('./routes/internal'));

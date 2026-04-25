@@ -1,6 +1,11 @@
 'use strict';
-// routes/jobs.js v2.0 — PostgreSQL edition
-// Updated: 2026-04-24
+// routes/jobs.js v2.2 — PostgreSQL edition
+// Updated: 2026-04-25
+// v2.2: KB index-to-kb работает через enqueueIndex() из utils/qdrant.js;
+//       заглушка 503 снята; добавлен GET /:id/kb-status;
+//       переключено с melki_knowledge на QDRANT_COLLECTION (melki_knowledge_v2).
+// v2.1: Qdrant indexing вынесен в utils/qdrant.js (общая очередь concurrency=1).
+//       Локальные функции chunkText/sendToQdrant/sendChunkToQdrant удалены.
 
 const express = require('express');
 const path = require('path');
@@ -11,7 +16,8 @@ const multer = require('multer');
 const { dbGet, dbAll, dbRun } = require('../db');
 const { authMiddleware } = require('../middleware');
 const { escapeHtml, logEvent, detectFileType, getTranscript } = require('../utils/helpers');
-const { UPLOAD_PATH, RESULTS_PATH } = require('../config');
+const { UPLOAD_PATH, RESULTS_PATH, QDRANT_HOST, QDRANT_PORT, QDRANT_COLLECTION } = require('../config');
+const { enqueueIndex, getQueueSnapshot } = require('../utils/qdrant');
 
 const router = express.Router();
 
@@ -159,8 +165,8 @@ function deleteProjectFromQdrant(username, projectName) {
     });
     const http = require('http');
     const req2 = http.request({
-      hostname: 'qdrant', port: 6333,
-      path: '/collections/melki_knowledge/points/delete',
+      hostname: QDRANT_HOST, port: QDRANT_PORT,
+      path: `/collections/${QDRANT_COLLECTION}/points/delete`,
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }
     }, (r) => { let d = ''; r.on('data', c => d += c); r.on('end', () => resolve(d)); });
@@ -190,13 +196,13 @@ router.get('/projects', authMiddleware, async (req, res) => {
       [username]);
     const body = JSON.stringify({
       filter: { must: [{ key: 'username', match: { value: username } }] },
-      with_payload: ['project'], limit: 1000
+      with_payload: ['project'], with_vector: false, limit: 100
     });
     const http = require('http');
     const data = await new Promise((resolve, reject) => {
       const req2 = http.request({
-        hostname: 'qdrant', port: 6333,
-        path: '/collections/melki_knowledge/points/scroll',
+        hostname: QDRANT_HOST, port: QDRANT_PORT,
+        path: `/collections/${QDRANT_COLLECTION}/points/scroll`,
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }
       }, (r) => {
@@ -339,9 +345,35 @@ router.get('/:id/download/docx', authMiddleware, async (req, res) => {
 });
 
 // ===== DOWNLOAD: TXT / SRT / JSON =====
+router.get('/:id/download/docx-clean', authMiddleware, async (req, res) => {
+  const job = await dbGet('SELECT * FROM transcribe_jobs WHERE id = ? AND user_id = ?', [req.params.id, req.user.id]);
+  if (!job) return res.status(404).json({ error: 'Задание не найдено' });
+  if (!job.result_clean) return res.status(404).json({ error: 'Результат не готов' });
+  try {
+    const { Document, Packer, Paragraph, TextRun } = require('docx');
+    const cleanText = job.result_clean
+      .replace(/^(\u0413\u043e\u043b\u043e\u0441\s*\d+|SPEAKER_\w+):\s*/gm, '')
+      .replace(/^(\u0413\u043e\u043b\u043e\u0441\s*\d+|SPEAKER_\w+)\s*\n/gm, '');
+    const lines = cleanText.split('\n');
+    const children = [];
+    for (const line of lines) {
+      children.push(new Paragraph({ children: [new TextRun({ text: line, size: 24, font: 'Arial' })] }));
+    }
+    const doc = new Document({ sections: [{ properties: {}, children }] });
+    const buf = await Packer.toBuffer(doc);
+    const baseName = require('path').basename(job.original_name, require('path').extname(job.original_name));
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(baseName)}_clean.docx`);
+    logEvent('job.downloaded', req.params.id, req.user.id, { format: 'docx-clean' }, 'web');
+    res.send(buf);
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 router.get('/:id/download/:format', authMiddleware, async (req, res) => {
   const { id, format } = req.params;
-  if (!['txt', 'srt', 'json'].includes(format)) return res.status(400).json({ error: 'Неверный формат' });
+  if (!['txt', 'srt', 'json', 'clean', 'docx-clean'].includes(format)) return res.status(400).json({ error: 'Неверный формат' });
 
   const job = await dbGet('SELECT * FROM transcribe_jobs WHERE id = ? AND user_id = ?', [id, req.user.id]);
   if (!job) return res.status(404).json({ error: 'Задание не найдено' });
@@ -392,20 +424,61 @@ router.post('/:id/index-to-kb', authMiddleware, async (req, res) => {
   if (!text.trim()) return res.status(400).json({ error: 'Нет текстового результата' });
 
   const project = (req.body && req.body.project || 'default').trim() || 'default';
+  const username = req.user.name || req.user.email;
+  const docId = `transcribe:${job.id}`;
 
-  sendToQdrant({
-    job_id:        String(job.id),
-    text,
-    source:        'transcribe',
-    username:      req.user.name || req.user.email,
-    project,
-    original_name: job.original_name,
-    created_at:    job.created_at,
+  try {
+    const result = await enqueueIndex({
+      jobId:         job.id,
+      source:        'transcribe',
+      text,
+      username,
+      project,
+      doc_id:        docId,
+      original_name: job.original_name,
+      created_at:    job.created_at,
+    });
+
+    await dbRun('UPDATE transcribe_jobs SET project = ? WHERE id = ?', [project, req.params.id]);
+
+    logEvent('job.indexed_to_kb', req.params.id, req.user.id, {
+      original_name: job.original_name, project, queue_position: result.position
+    }, 'web');
+
+    res.json({ ok: true, project, queued: true, position: result.position, duplicate: !!result.duplicate });
+  } catch (e) {
+    console.error('[index-to-kb]', e.message);
+    res.status(500).json({ error: 'Ошибка постановки в очередь: ' + e.message });
+  }
+});
+
+// ===== KB STATUS =====
+router.get('/:id/kb-status', authMiddleware, async (req, res) => {
+  const job = await dbGet(
+    'SELECT id, kb_status, kb_chunks, kb_indexed_at, kb_error, project FROM transcribe_jobs WHERE id = ? AND user_id = ?',
+    [req.params.id, req.user.id]
+  );
+  if (!job) return res.status(404).json({ error: 'Задание не найдено' });
+
+  const queue = getQueueSnapshot();
+  const positionInQueue = queue.queued_ids.indexOf(req.params.id);
+
+  res.json({
+    id: job.id,
+    status: job.kb_status || 'none',
+    chunks: job.kb_chunks,
+    indexed_at: job.kb_indexed_at,
+    error: job.kb_error,
+    project: job.project,
+    queue_position: positionInQueue >= 0 ? positionInQueue + 1 : null,
+    queue_running: queue.running,
+    queue_length: queue.queue_length,
   });
-  await dbRun('UPDATE transcribe_jobs SET project = ? WHERE id = ?', [project, req.params.id]);
+});
 
-  logEvent('job.indexed_to_kb', req.params.id, req.user.id, { original_name: job.original_name, project }, 'web');
-  res.json({ ok: true, project });
+// ===== KB QUEUE (общий снапшот) =====
+router.get('/kb-queue/status', authMiddleware, async (req, res) => {
+  res.json(getQueueSnapshot());
 });
 
 // ===== DELETE =====
@@ -420,56 +493,5 @@ router.delete('/:id', authMiddleware, async (req, res) => {
   logEvent('job.archived', req.params.id, req.user.id, { original_name: job.original_name });
   res.json({ message: 'Задание удалено' });
 });
-
-// ── Qdrant helpers ────────────────────────────────────────────
-function chunkText(text, chunkSize = 2000, overlap = 200) {
-  const chunks = [];
-  let start = 0;
-  const t = text.trim();
-  while (start < t.length) {
-    let end = Math.min(start + chunkSize, t.length);
-    if (end < t.length) {
-      const nlIdx  = t.lastIndexOf('\n', end);
-      const dotIdx = t.lastIndexOf('. ', end);
-      const brk    = Math.max(nlIdx, dotIdx);
-      if (brk > start + chunkSize * 0.4) end = brk + 1;
-    }
-    const chunk = t.slice(start, end).trim();
-    if (chunk.length > 50) chunks.push(chunk);
-    start = end - overlap;
-    if (start >= t.length) break;
-  }
-  return chunks;
-}
-
-function sendChunkToQdrant({ job_id, chunk, chunk_idx, total_chunks, source, username, project, original_name, created_at }) {
-  const body = JSON.stringify({
-    job_id: String(job_id), text: chunk, chunk_idx, total_chunks,
-    source, username: username || 'unknown',
-    project: project || 'default',
-    original_name: original_name || '',
-    created_at: created_at || new Date().toISOString(),
-  });
-  const http = require('http');
-  const req = http.request({
-    hostname: 'n8n', port: 5678, path: '/webhook/qdrant-index', method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
-    timeout: 10000,
-  }, (r) => { r.resume(); });
-  req.on('error', () => {});
-  req.write(body); req.end();
-}
-
-function sendToQdrant({ job_id, text, source, username, project, original_name, created_at }) {
-  const chunks = chunkText(text || '');
-  if (!chunks.length) return;
-  chunks.forEach((chunk, i) => {
-    setTimeout(() => {
-      sendChunkToQdrant({ job_id, chunk, chunk_idx: i, total_chunks: chunks.length,
-                          source, username, project, original_name, created_at });
-    }, i * 300);
-  });
-  console.log(`[qdrant] ${source}#${job_id}: ${chunks.length} chunks queued`);
-}
 
 module.exports = router;

@@ -1,6 +1,9 @@
 'use strict';
-// db.js v2.0 — PostgreSQL edition
-// Updated: 2026-04-24
+// db.js v2.1 — PostgreSQL edition + KB migration
+// Updated: 2026-04-25
+// v2.1: + миграция kb_status/kb_chunks/kb_indexed_at/kb_error/kb_collection
+//       + миграция transcribe_jobs.project (была неявно)
+//       + recovery hook для индексации (вызывается из utils/qdrant.js при старте)
 
 const { Pool } = require('pg');
 const { v4: uuidv4 } = require('uuid');
@@ -79,6 +82,19 @@ async function initDb() {
       expires_at    TIMESTAMPTZ
     )
   `);
+
+  // ─── Миграции (идемпотентно) ──────────────────────────────────
+  // project: уже использовался в jobs.js, но в схеме его не было
+  await pool.query(`ALTER TABLE transcribe_jobs ADD COLUMN IF NOT EXISTS project TEXT`);
+
+  // KB-индексация (Этап 1, чат #32)
+  await pool.query(`ALTER TABLE transcribe_jobs ADD COLUMN IF NOT EXISTS kb_status TEXT DEFAULT 'none'`);
+  await pool.query(`ALTER TABLE transcribe_jobs ADD COLUMN IF NOT EXISTS kb_chunks INTEGER`);
+  await pool.query(`ALTER TABLE transcribe_jobs ADD COLUMN IF NOT EXISTS kb_indexed_at TIMESTAMPTZ`);
+  await pool.query(`ALTER TABLE transcribe_jobs ADD COLUMN IF NOT EXISTS kb_error TEXT`);
+  await pool.query(`ALTER TABLE transcribe_jobs ADD COLUMN IF NOT EXISTS kb_collection TEXT DEFAULT 'melki_knowledge_v2'`);
+
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_tr_jobs_kb_status ON transcribe_jobs(kb_status)`);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS transcribe_settings (
@@ -164,7 +180,7 @@ async function initDb() {
     console.log('[db] Default prompt profiles created');
   }
 
-  console.log('[db] PostgreSQL initialized (transcribe schema)');
+  console.log('[db] PostgreSQL initialized (transcribe schema, KB migration applied)');
 }
 
 module.exports = { pool, pgify, dbGet, dbAll, dbRun, initDb };

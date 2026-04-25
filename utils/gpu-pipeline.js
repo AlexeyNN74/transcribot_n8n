@@ -1,7 +1,12 @@
 'use strict';
 /**
- * gpu-pipeline.js v2.0 — PostgreSQL edition
- * Updated: 2026-04-24
+ * gpu-pipeline.js v2.2 — PostgreSQL edition
+ * Updated: 2026-04-25
+ * v2.2: Автоматическая индексация в KB после транскрипции отключена.
+ *       Пользователь индексирует явным нажатием 🧠 на UI — там можно
+ *       выбрать проект. Импорт sendToQdrant удалён.
+ * v2.1: Qdrant вынесен в utils/qdrant.js (общая очередь concurrency=1).
+ *       Локальные функции chunkText/sendToQdrant/sendChunkToQdrant удалены.
  */
 
 const { exec } = require('child_process');
@@ -13,6 +18,7 @@ const { v4: uuidv4 } = require('uuid');
 const { pool, pgify, dbGet, dbAll, dbRun } = require('../db');
 const { logEvent, escapeHtml } = require('../utils/helpers');
 const { sendEmail } = require('../utils/email');
+// v2.2: автоматическая индексация в KB отключена — sendToQdrant больше не импортируется
 
 const execAsync = promisify(exec);
 
@@ -403,9 +409,8 @@ async function handleDone(jobId, payload) {
     }
 
     log(`Job completed: ${jobId}`);
-    try {
-      sendToQdrant({ job_id: jobId, text: resultClean || resultTxt, source: 'transcribe', username: job.name, original_name: job.original_name, created_at: job.created_at });
-    } catch(_e) { log('[qdrant] ' + _e.message); }
+    // v2.2: автоматическая индексация в KB отключена.
+    // Пользователь индексирует явным нажатием 🧠 на UI и выбирает проект.
 
     fs.rmSync(localResultDir, { recursive: true, force: true });
     sshExec(`rm -rf ${remoteResultDir}`, 10000).catch(() => {});
@@ -559,54 +564,9 @@ async function generateSummary(cleanText, promptText) {
 // ═══════════════════════════════════════════════════
 // Qdrant
 // ═══════════════════════════════════════════════════
-
-function chunkText(text, chunkSize = 2000, overlap = 200) {
-  const chunks = [];
-  let start = 0;
-  const t = (text || '').trim();
-  while (start < t.length) {
-    let end = Math.min(start + chunkSize, t.length);
-    if (end < t.length) {
-      const nlIdx  = t.lastIndexOf('\n', end);
-      const dotIdx = t.lastIndexOf('. ', end);
-      const brk    = Math.max(nlIdx, dotIdx);
-      if (brk > start + chunkSize * 0.4) end = brk + 1;
-    }
-    const chunk = t.slice(start, end).trim();
-    if (chunk.length > 50) chunks.push(chunk);
-    start = end - overlap;
-    if (start >= t.length) break;
-  }
-  return chunks;
-}
-
-function sendChunkToQdrant({ job_id, chunk, chunk_idx, total_chunks, source, username, original_name, created_at }) {
-  const body = JSON.stringify({
-    job_id: String(job_id), text: chunk, chunk_idx, total_chunks,
-    source, username: username || 'unknown',
-    original_name: original_name || '',
-    created_at: created_at || new Date().toISOString(),
-  });
-  const http = require('http');
-  const req = http.request({
-    hostname: 'n8n', port: 5678, path: '/webhook/qdrant-index', method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
-    timeout: 10000,
-  }, (r) => { r.resume(); });
-  req.on('error', () => {});
-  req.write(body); req.end();
-}
-
-function sendToQdrant({ job_id, text, source, username, original_name, created_at }) {
-  const chunks = chunkText(text);
-  if (!chunks.length) return;
-  chunks.forEach((chunk, i) => {
-    setTimeout(() => {
-      sendChunkToQdrant({ job_id, chunk, chunk_idx: i, total_chunks: chunks.length, source, username, original_name, created_at });
-    }, i * 300);
-  });
-  log(`[qdrant] ${source}#${job_id}: ${chunks.length} chunks queued`);
-}
+// Логика Qdrant вынесена в utils/qdrant.js.
+// v2.2: Автоматический вызов sendToQdrant из этого pipeline удалён.
+//       KB-индексация — только по явному нажатию 🧠 на UI.
 
 // ═══════════════════════════════════════════════════
 // Utils

@@ -843,6 +843,7 @@
         <ul class="sidebar-nav">
           <li><a onclick="showTab('upload')" id="tab-upload-link" class="active">📤 Загрузить файл</a></li>
           <li><a onclick="showTab('jobs')" id="tab-jobs-link">📋 Мои задания</a></li>
+          <li><a onclick="showTab('search')" id="tab-search-link">🔍 Поиск по базе знаний</a></li>
           <li><a onclick="showTab('profiles')" id="tab-profiles-link">🎛️ Мои профили</a></li>
           <li id="admin-menu-item" style="display:none"><a onclick="showTab('admin')" id="tab-admin-link">⚙️ Администрирование</a></li>
         </ul>
@@ -969,6 +970,52 @@
 
           <div id="jobs-alert" class="alert"></div>
           <div id="jobs-container"></div>
+        </div>
+
+        <!-- Profiles Tab -->
+        <!-- Search Tab (KB) -->
+        <div id="tab-search" class="tab-content">
+          <div class="page-header">
+            <div class="page-title">Поиск по базе знаний</div>
+          </div>
+
+          <div class="card" style="margin-bottom:16px">
+            <div class="form-group" style="margin-bottom:12px">
+              <label for="search-query">Запрос (естественный язык, до 1000 символов)</label>
+              <input type="text" id="search-query" class="input" placeholder="например: что говорилось о деньгах и переговорах" onkeydown="if(event.key==='Enter') runKbSearch()">
+            </div>
+            <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;margin-bottom:12px">
+              <div class="form-group" style="flex:1;min-width:160px;margin-bottom:0">
+                <label for="search-project">Проект</label>
+                <select id="search-project" class="input">
+                  <option value="">— любой —</option>
+                </select>
+              </div>
+              <div class="form-group" style="flex:1;min-width:160px;margin-bottom:0">
+                <label for="search-source">Источник</label>
+                <select id="search-source" class="input">
+                  <option value="">— любой —</option>
+                  <option value="transcribe">Транскрибация</option>
+                  <option value="converter">Конвертер</option>
+                  <option value="pdfocr">PDF OCR</option>
+                  <option value="bulk">Импорт (md/файлы)</option>
+                </select>
+              </div>
+              <div class="form-group" style="width:120px;margin-bottom:0">
+                <label for="search-limit">Результатов</label>
+                <select id="search-limit" class="input">
+                  <option value="10" selected>10</option>
+                  <option value="20">20</option>
+                  <option value="50">50</option>
+                </select>
+              </div>
+              <button class="btn btn-primary" onclick="runKbSearch()" id="search-btn">🔍 Найти</button>
+            </div>
+            <div id="search-info" style="font-size:12px;color:var(--text2)"></div>
+          </div>
+
+          <div id="search-alert" class="alert"></div>
+          <div id="search-results"></div>
         </div>
 
         <!-- Profiles Tab -->
@@ -1261,6 +1308,7 @@ function showTab(tab) {
   if (tab === 'upload') loadPromptsForUpload();
   if (tab === 'profiles') loadProfiles();
   if (tab === 'jobs') { loadJobs(); loadProjects(); }
+  if (tab === 'search') initKbSearchTab();
   if (tab === 'admin') loadAdminData();
 }
 
@@ -2172,9 +2220,9 @@ async function loadProjects() {
     const list = document.getElementById('proj-nav-list');
     if (!list) return;
     list.innerHTML = '<li><a class="' + (!activeProject ? 'active' : '') + '" onclick="setActiveProject(null)">Все задания</a></li>'
-      + all.map(p => '<li><a class="' + (activeProject===p?'active':'') + '" onclick="setActiveProject('' + p.replace(/'/g,"\'") + '')">'
+      + all.map(p => '<li><a class="' + (activeProject===p?'active':'') + '" onclick="setActiveProject(\'' + p.replace(/'/g,"\\'") + '\')">'
         + p + '</a>'
-        + '<button class="proj-del" onclick="event.stopPropagation();showProjectModal('' + p.replace(/'/g,"\'") + '')" title="Управление проектом">✕</button>'
+        + '<button class="proj-del" onclick="event.stopPropagation();showProjectModal(\'' + p.replace(/'/g,"\\'") + '\')" title="Управление проектом">\u2715</button>'
         + '</li>').join('');
     const notifEl = document.getElementById('proj-notifications');
     if (notifEl) {
@@ -2334,6 +2382,104 @@ function toggleRowSelect(tr) {
   if (window.getSelection().toString()) return;
   if (event && event.target.closest('button')) return;
   tr.classList.toggle('job-selected');
+}
+
+// ===== KB SEARCH =====
+let _kbSearchInited = false;
+
+async function initKbSearchTab() {
+  // Один раз подгружаем список проектов в селект
+  if (_kbSearchInited) return;
+  _kbSearchInited = true;
+  try {
+    const d = await api('GET', '/api/jobs/projects');
+    const projects = (d.projects || []).filter(p => p && p !== 'default');
+    const sel = document.getElementById('search-project');
+    if (sel) {
+      const current = sel.value;
+      sel.innerHTML = '<option value="">— любой —</option>'
+        + projects.map(p => `<option value="${p.replace(/"/g,'&quot;')}">${p}</option>`).join('');
+      if (current) sel.value = current;
+    }
+  } catch(_) {}
+  // Фокус на поле ввода
+  setTimeout(() => document.getElementById('search-query')?.focus(), 100);
+}
+
+async function runKbSearch() {
+  const queryEl = document.getElementById('search-query');
+  const btn = document.getElementById('search-btn');
+  const info = document.getElementById('search-info');
+  const alertBox = document.getElementById('search-alert');
+  const resultsBox = document.getElementById('search-results');
+  alertBox.style.display = 'none';
+
+  const query = (queryEl.value || '').trim();
+  if (!query) { showNotify('Введи запрос'); queryEl.focus(); return; }
+
+  const project = document.getElementById('search-project').value || '';
+  const source  = document.getElementById('search-source').value || '';
+  const limit   = parseInt(document.getElementById('search-limit').value) || 10;
+
+  btn.disabled = true;
+  const origText = btn.textContent;
+  btn.textContent = '⏳ Поиск...';
+  info.textContent = '';
+  resultsBox.innerHTML = '';
+
+  try {
+    const body = { query, limit };
+    if (project) body.project = project;
+    if (source)  body.source  = source;
+    const data = await api('POST', '/api/search', body);
+
+    const results = data.results || [];
+    info.textContent = `Найдено: ${results.length} • за ${data.elapsed_ms} мс`
+      + (data.filters && Object.keys(data.filters).length
+          ? ` • фильтры: ${Object.entries(data.filters).map(([k,v]) => `${k}=${v}`).join(', ')}`
+          : '');
+
+    if (!results.length) {
+      resultsBox.innerHTML = '<div class="card" style="text-align:center;color:var(--text2);padding:24px">Ничего не найдено. Попробуй другой запрос или сними фильтры.</div>';
+      return;
+    }
+
+    resultsBox.innerHTML = results.map((r, i) => {
+      const score = (r.score * 100).toFixed(1);
+      const scoreClass = r.score >= 0.7 ? 'success' : (r.score >= 0.5 ? 'warning' : 'muted');
+      const dateStr = r.created_at ? new Date(r.created_at).toLocaleDateString('ru-RU') : '';
+      const sourceLabel = { transcribe: 'Транскрибация', converter: 'Конвертер', pdfocr: 'PDF OCR', bulk: 'Импорт' }[r.source] || r.source;
+      const text = (r.text || '').replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+      const snippet = text.length > 600 ? text.slice(0, 600) + '…' : text;
+      return `
+        <div class="card" style="margin-bottom:12px">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;font-size:12px;color:var(--text2)">
+            <div>
+              <span style="background:rgba(108,99,255,0.15);color:var(--accent);padding:2px 8px;border-radius:4px;font-weight:600">#${i+1}</span>
+              <span style="margin-left:8px">${sourceLabel}</span>
+              ${r.project ? `<span style="margin-left:8px">📁 ${r.project}</span>` : ''}
+              ${r.original_name ? `<span style="margin-left:8px">📄 ${r.original_name.replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]))}</span>` : ''}
+              ${dateStr ? `<span style="margin-left:8px">${dateStr}</span>` : ''}
+              ${r.chunk_idx !== null ? `<span style="margin-left:8px">фр. ${r.chunk_idx + 1}/${r.total_chunks}</span>` : ''}
+            </div>
+            <div style="font-weight:600;color:var(--${scoreClass === 'muted' ? 'text2' : scoreClass})">
+              ${score}%
+            </div>
+          </div>
+          <div style="white-space:pre-wrap;font-size:14px;line-height:1.5;color:var(--text)">${snippet}</div>
+        </div>
+      `;
+    }).join('');
+  } catch(e) {
+    resultsBox.innerHTML = '';
+    info.textContent = '';
+    alertBox.className = 'alert error';
+    alertBox.style.display = 'block';
+    alertBox.textContent = 'Ошибка: ' + e.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = origText;
+  }
 }
 
 // ===== NOTIFICATION MODAL =====

@@ -1,8 +1,10 @@
 {
   "name": "transcribe-studio",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "main": "server.js",
   "dependencies": {
+    "@huggingface/transformers": "^3.0.2",
+    "@qdrant/js-client-rest": "^1.12.0",
     "bcryptjs": "^2.4.3",
     "docx": "^9.6.1",
     "express": "^4.18.2",

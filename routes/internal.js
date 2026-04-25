@@ -1,6 +1,8 @@
 'use strict';
-// routes/internal.js v2.0 — PostgreSQL edition
-// Updated: 2026-04-24
+// routes/internal.js v2.2 — PostgreSQL edition
+// Updated: 2026-04-25
+// v2.2: Автоматический sendToQdrant в /job-result отключён.
+//       Индексация в KB — только по явному нажатию 🧠 на UI.
 
 const fs = require('fs');
 const path = require('path');
@@ -11,6 +13,7 @@ const { dbGet, dbAll, dbRun } = require('../db');
 const { escapeHtml, logEvent } = require('../utils/helpers');
 const { sendEmail } = require('../utils/email');
 const { JWT_SECRET, GPU_API_KEY, APP_URL, RESULTS_PATH, UPLOAD_PATH, INTERNAL_TOKEN } = require('../config');
+const { enqueueIndex } = require('../utils/qdrant');
 
 const router = express.Router();
 
@@ -101,14 +104,8 @@ router.post('/job-result', async (req, res) => {
         text-decoration:none;border-radius:6px;display:inline-block">Открыть результат</a>
       <p>Файл будет доступен ${fullJob.keep_days} дней.</p>
     `);
-    sendToQdrant({
-      job_id:        fullJob.id,
-      text:          result_clean || result_txt || '',
-      source:        'transcribe',
-      username:      fullJob.name,
-      original_name: fullJob.original_name,
-      created_at:    fullJob.created_at,
-    });
+    // v2.2: автоматическая индексация в KB отключена.
+    // Пользователь индексирует явным нажатием 🧠 — там можно выбрать проект.
   }
 
   logEvent('job.completed', job.id, job.user_id, {
@@ -246,24 +243,44 @@ router.get('/events', async (req, res) => {
   res.json(events);
 });
 
-// ── Qdrant helpers ────────────────────────────────────────────
-function sendToQdrant({ job_id, text, source, username, original_name, created_at }) {
-  const body = JSON.stringify({
-    job_id:        String(job_id),
-    text:          (text || '').slice(0, 8000),
-    source,
-    username:      username || 'unknown',
-    original_name: original_name || '',
-    created_at:    created_at || new Date().toISOString(),
-  });
-  const http = require('http');
-  const req = http.request({
-    hostname: 'n8n', port: 5678, path: '/webhook/qdrant-index', method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
-    timeout: 10000,
-  }, (r) => { r.resume(); });
-  req.on('error', () => {});
-  req.write(body); req.end();
-}
+// ===== BULK INDEX (md-файлы из CLI/скрипта) =====
+// Защищён INTERNAL_TOKEN. Принимает один документ за запрос
+// (несколько файлов = несколько запросов). Возвращает статус постановки в очередь.
+router.post('/bulk-index', async (req, res) => {
+  const token = req.headers['x-internal-token'];
+  if (!token || token !== INTERNAL_TOKEN) return res.status(403).json({ error: 'Invalid internal token' });
+
+  const { username, project, source, doc_id, original_name, text, created_at } = req.body || {};
+  if (!username) return res.status(400).json({ error: 'username required' });
+  if (!project)  return res.status(400).json({ error: 'project required' });
+  if (!doc_id)   return res.status(400).json({ error: 'doc_id required' });
+  if (!text || !String(text).trim()) return res.status(400).json({ error: 'text required' });
+
+  // Псевдо-jobId для bulk = doc_id (он уникален). В transcribe_jobs запись НЕ создаём —
+  // это импорт извне, не транскрипция. enqueueIndex попытается обновить kb_status в БД,
+  // но WHERE id = ? просто ничего не найдёт — это нормально для bulk.
+  try {
+    const result = await enqueueIndex({
+      jobId:         doc_id,
+      source:        source || 'bulk',
+      text,
+      username,
+      project,
+      doc_id,
+      original_name: original_name || '',
+      created_at:    created_at || new Date().toISOString(),
+    });
+
+    logEvent('kb.bulk_indexed', null, null, {
+      doc_id, project, username, source: source || 'bulk',
+      original_name: original_name || '', text_length: text.length,
+    }, 'bulk').catch(() => {});
+
+    res.json({ ok: true, doc_id, project, queue_position: result.position, duplicate: !!result.duplicate });
+  } catch (e) {
+    console.error('[bulk-index]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
 
 module.exports = router;

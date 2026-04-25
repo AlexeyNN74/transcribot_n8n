@@ -1,6 +1,7 @@
 'use strict';
-// Version: 1.9.8
-// Updated: 2026-04-11
+// Version: 2.1.0
+// Updated: 2026-04-25
+// v2.1: + Qdrant/Embeddings конфиг для семантического поиска (Этап 1+2)
 
 const path = require('path');
 const fs = require('fs');
@@ -29,13 +30,34 @@ const N8N_URL = process.env.N8N_URL || 'http://212.67.8.251:5678';
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 });
 
-
 const INTERNAL_TOKEN = process.env.INTERNAL_TOKEN || 'melki_internal_2026';
+
+// ─── Qdrant + Embeddings (новое в v2.1) ──────────────────────
+const QDRANT_HOST       = process.env.QDRANT_HOST       || 'qdrant';
+const QDRANT_PORT       = parseInt(process.env.QDRANT_PORT || '6333');
+const QDRANT_COLLECTION = process.env.QDRANT_COLLECTION || 'melki_knowledge_v2';
+
+// bge-m3 в ONNX INT8: размер вектора 1024, distance Cosine.
+// Кэш модели монтируется как volume — см. инструкцию деплоя.
+const EMBED_MODEL          = process.env.EMBED_MODEL          || 'Xenova/bge-m3';
+const EMBED_QUANTIZATION   = process.env.EMBED_QUANTIZATION   || 'q8';
+const EMBED_VECTOR_SIZE    = parseInt(process.env.EMBED_VECTOR_SIZE    || '1024');
+const EMBED_AUTOUNLOAD_MS  = parseInt(process.env.EMBED_AUTOUNLOAD_MS  || '1800000'); // 30 мин
+const EMBED_CACHE_DIR      = process.env.EMBED_CACHE_DIR      || '/root/.cache/huggingface';
+
+// Чанкование документа
+const KB_CHUNK_SIZE    = parseInt(process.env.KB_CHUNK_SIZE    || '2000');
+const KB_CHUNK_OVERLAP = parseInt(process.env.KB_CHUNK_OVERLAP || '200');
+
 module.exports = {
   PORT, DB_PATH, UPLOAD_PATH, RESULTS_PATH,
   GPU_SERVER_URL, GPU_API_KEY, JWT_SECRET,
   APP_URL, ADMIN_EMAIL,
   OS_AUTH_URL, OS_GPU_ID, OS_USERNAME, OS_PASSWORD, OS_PROJECT,
   N8N_URL,
-  INTERNAL_TOKEN
+  INTERNAL_TOKEN,
+  QDRANT_HOST, QDRANT_PORT, QDRANT_COLLECTION,
+  EMBED_MODEL, EMBED_QUANTIZATION, EMBED_VECTOR_SIZE,
+  EMBED_AUTOUNLOAD_MS, EMBED_CACHE_DIR,
+  KB_CHUNK_SIZE, KB_CHUNK_OVERLAP,
 };
